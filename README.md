@@ -146,6 +146,29 @@ with budget.grant("finalize"):                  # gets its protected 135s no mat
 - Phases are modelled as running **one at a time** (sequential). Concurrent
   grants each see the full remaining runway — they don't split it.
 
+**Streaming salvage.** `cooperative_poll` wraps an `astream` so the output phase
+keeps whatever it managed to write when the deadline hits — a shorter memo, not a
+crash:
+
+```python
+from langgraph_node_deadline import cooperative_poll
+
+sections = []
+with budget.grant("finalize"):
+    async for chunk in cooperative_poll(agent.astream(state),
+                                        predicates=[budget.deadline_predicate()]):
+        sections.append(chunk)          # every section that lands before the deadline
+return assemble(sections)               # complete-but-shorter, never nothing
+```
+
+See it run — a greedy phase eats the budget but the memo still ships:
+
+```bash
+python examples/hourglass_demo.py
+#   NAIVE     -> FAILED — watchdog killed the run mid-research; NO memo produced
+#   HOURGLASS -> 5-section memo from 7 findings (ended in mode=halt)
+```
+
 > `Hourglass` lives on the `v0.2` branch, tracked in
 > [issue #1](https://github.com/youknowfred/langgraph-node-deadline/issues/1).
 > The kernel above is stable and shipped in `0.1.0`.

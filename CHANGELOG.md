@@ -23,10 +23,15 @@ layer. Tracks milestone v0.2.0-a in issue #1.
 - `Hourglass.validate()` — startup invariant-lock; raises on an incoherent
   envelope (reserves exceeding the total, non-positive floors).
 - `Grant.poll()` cooperative checkpoint and `Hourglass.deadline_predicate()`.
+- `cooperative_poll(aiter, predicates=[...])` — the streaming sibling of
+  `cooperative_wait_for`: wrap an `astream`, and when the deadline (or any
+  predicate) trips it stops cleanly and closes the upstream iterator, so the
+  consumer keeps the chunks it already accumulated. Silent salvage; never raises
+  at the consumer.
+- `examples/hourglass_demo.py` — the hero demo: a heavy input returns a
+  complete-but-shorter memo instead of timing out into nothing.
 
-### Still to come in 0.2 (issue #1)
-- `cooperative_poll(astream, predicates=[...])` streaming salvage.
-- The "20-min input returns a shorter answer instead of nothing" hero demo.
+v0.2 is feature-complete for the v0.2.0-a milestone in issue #1.
 
 ## [0.1.0] — unreleased
 

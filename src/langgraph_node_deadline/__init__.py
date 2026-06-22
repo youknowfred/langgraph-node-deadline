@@ -61,6 +61,7 @@ __all__ = [
     "node_deadline_exceeded",
     "clamp_to_node_deadline",
     "cooperative_wait_for",
+    "cooperative_poll",
     # --- v0.2 hourglass (run-wide budget) ---
     "Hourglass",
     "Grant",
@@ -181,6 +182,61 @@ async def cooperative_wait_for(
     """
     timeout = clamp_to_node_deadline(budget_secs, reserve_secs=reserve_secs)
     return await asyncio.wait_for(awaitable, timeout)
+
+
+async def cooperative_poll(aiter, *, predicates=None, bound_each_chunk=True):
+    """Stream an async iterable, stopping cleanly when the deadline (or any
+    predicate) trips — so the consumer keeps whatever it accumulated.
+
+    The streaming sibling of :func:`cooperative_wait_for`. Wrap an
+    ``agent.astream(...)`` (or any async iterator) and iterate it::
+
+        sections = []
+        with node_deadline_in(120):
+            async for chunk in cooperative_poll(agent.astream(state)):
+                sections.append(chunk)        # whatever arrives before the deadline
+        return assemble(sections)             # a complete-but-shorter answer
+
+    Before each chunk it checks the predicates; if any returns ``True`` it stops,
+    closing the underlying iterator. With ``bound_each_chunk`` (default), each
+    pull is *also* clamped to the remaining node-deadline, so a single slow chunk
+    can't overrun. Stopping is **silent** — the ``async for`` just ends and your
+    accumulated chunks are the salvaged partial result; it never raises
+    ``TimeoutError`` at the consumer.
+
+    Args:
+        aiter: Any async iterable / async generator (e.g. an ``astream``).
+        predicates: No-arg callables; iteration stops when any returns ``True``.
+            Defaults to ``[node_deadline_exceeded]`` — so with no active scope it
+            is fail-open and yields everything.
+        bound_each_chunk: Clamp each chunk pull to the remaining node-deadline.
+    """
+    preds = list(predicates) if predicates is not None else [node_deadline_exceeded]
+    it = aiter.__aiter__()
+    try:
+        while True:
+            if any(p() for p in preds):
+                break
+            remaining = (
+                get_node_deadline_remaining_secs() if bound_each_chunk else None
+            )
+            try:
+                if remaining is not None:
+                    chunk = await asyncio.wait_for(it.__anext__(), remaining)
+                else:
+                    chunk = await it.__anext__()
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                break  # ran out of runway mid-chunk → salvage what we have
+            yield chunk
+    finally:
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()  # best-effort close so the upstream stream tears down
+            except Exception:
+                pass
 
 
 # The run-wide budget layer builds on the kernel above. Imported at the end so

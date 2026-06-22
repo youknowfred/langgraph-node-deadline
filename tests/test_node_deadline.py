@@ -12,6 +12,7 @@ import pytest
 
 from langgraph_node_deadline import (
     clamp_to_node_deadline,
+    cooperative_poll,
     cooperative_wait_for,
     get_node_deadline_remaining_secs,
     node_deadline_exceeded,
@@ -151,3 +152,62 @@ async def test_cooperative_wait_for_fail_open_without_scope():
 async def _quick():
     await asyncio.sleep(0.01)
     return "done"
+
+
+# --------------------------------------------------------------------------- #
+# cooperative_poll (streaming salvage)                                         #
+# --------------------------------------------------------------------------- #
+
+async def _gen(n, delay=0.0):
+    for i in range(n):
+        if delay:
+            await asyncio.sleep(delay)
+        yield i
+
+
+async def test_cooperative_poll_yields_all_within_deadline():
+    with node_deadline_in(5.0):
+        out = [c async for c in cooperative_poll(_gen(5))]
+    assert out == [0, 1, 2, 3, 4]
+
+
+async def test_cooperative_poll_is_fail_open_without_scope():
+    out = [c async for c in cooperative_poll(_gen(4))]
+    assert out == [0, 1, 2, 3]
+
+
+async def test_cooperative_poll_stops_and_salvages_when_deadline_trips():
+    out = []
+    with node_deadline_in(0.25):
+        async for c in cooperative_poll(_gen(100, delay=0.1)):
+            out.append(c)
+    assert 0 < len(out) < 100  # kept the early chunks, didn't run all 100
+
+
+async def test_cooperative_poll_closes_underlying_generator_on_early_stop():
+    closed = {"v": False}
+
+    async def gen():
+        try:
+            i = 0
+            while True:
+                await asyncio.sleep(0.1)
+                yield i
+                i += 1
+        finally:
+            closed["v"] = True
+
+    with node_deadline_in(0.25):
+        async for _ in cooperative_poll(gen()):
+            pass
+    assert closed["v"] is True
+
+
+async def test_cooperative_poll_honors_a_custom_predicate():
+    seen = []
+    stop = {"v": False}
+    async for c in cooperative_poll(_gen(10), predicates=[lambda: stop["v"]]):
+        seen.append(c)
+        if len(seen) == 3:
+            stop["v"] = True  # checked before the next pull -> stops after 3
+    assert seen == [0, 1, 2]
