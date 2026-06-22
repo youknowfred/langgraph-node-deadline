@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langgraph-node-deadline"
+version = "0.1.0"
+description = "One binding deadline for every inner timeout in a LangGraph node — clamp inner budgets to the cooperative deadline so work salvages instead of getting killed by the watchdog."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Fred Becker" }]
+keywords = [
+    "langgraph",
+    "langchain",
+    "asyncio",
+    "timeout",
+    "deadline",
+    "cancellation",
+    "agents",
+    "llm",
+    "reliability",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://github.com/youknowfred/langgraph-node-deadline"
+Issues = "https://github.com/youknowfred/langgraph-node-deadline/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/langgraph_node_deadline"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
