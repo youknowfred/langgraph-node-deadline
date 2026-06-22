@@ -4,7 +4,8 @@
 budgets to the node's cooperative deadline so heavy work **salvages a partial
 result** instead of getting hard-killed by the watchdog and discarding everything.
 
-Zero runtime dependencies. ~120 lines. Python 3.9+.
+Zero runtime dependencies. Python 3.9+. The kernel is ~120 lines; an optional
+`Hourglass` budget layer ([v0.2](#run-wide-budgets-hourglass-v02--in-progress)) builds on it.
 
 ```bash
 pip install langgraph-node-deadline
@@ -109,7 +110,47 @@ threading the deadline through call signatures.
 weren't there — so adding it to one node never changes the behavior of the rest
 of your graph, your tests, or direct invocations.
 
-## Why a whole package for ~120 lines
+## Run-wide budgets: `Hourglass` (v0.2 — in progress)
+
+The kernel protects one node. `Hourglass` is the optional layer that spreads a
+single time budget across a whole graph and **guarantees your output phase its
+runway** — so a heavy run degrades to a shorter answer instead of timing out into
+nothing.
+
+```python
+from langgraph_node_deadline import Hourglass, protected, Mode
+
+budget = Hourglass(
+    total_secs=900,
+    reserve={"synthesis": protected(160), "finalize": protected(135)},
+).validate()                                    # crashes now on an incoherent envelope
+
+with budget.grant("research", cap=400) as g:    # sync `with`; awaiting inside is fine
+    if budget.mode >= Mode.FINISH_ONLY:         # ("finish_only" also works)
+        skip_optional_enrichment()              # shed optional work when runway is short
+    await g.poll()                              # cooperative cancel point
+
+with budget.grant("finalize"):                  # gets its protected 135s no matter what
+    ...
+```
+
+- **Reserves are floors, not caps.** `research` can use everything *except* the
+  runway still owed to phases that haven't completed — so it can't starve
+  `finalize`. A reserve is released once its phase completes.
+- **The `Mode` ladder is forward-only:** `NORMAL → CONSERVE → FINISH_ONLY → HALT`.
+  Reading `budget.mode` is side-effect-free; the floor ratchets only at `grant()`
+  boundaries, so a transient slow phase can't bounce the run back to `NORMAL`.
+- **`validate()` fails loud at startup** on reserves that exceed the total or
+  leave no `NORMAL` band — a budget misconfiguration becomes a crash, not a 3am
+  cascade.
+- Phases are modelled as running **one at a time** (sequential). Concurrent
+  grants each see the full remaining runway — they don't split it.
+
+> `Hourglass` lives on the `v0.2` branch, tracked in
+> [issue #1](https://github.com/youknowfred/langgraph-node-deadline/issues/1).
+> The kernel above is stable and shipped in `0.1.0`.
+
+## Why a package for something so small
 
 Because the *lesson* is the hard part, not the code. This is the
 [`derive-don't-pin`](https://github.com/langchain-ai/langgraph/issues/5672)

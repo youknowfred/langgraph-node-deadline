@@ -53,6 +53,7 @@ from contextvars import ContextVar
 from typing import Awaitable, Iterator, Optional, TypeVar
 
 __all__ = [
+    # --- v0.1 kernel ---
     "node_deadline",
     "node_deadline_scope",
     "node_deadline_in",
@@ -60,9 +61,15 @@ __all__ = [
     "node_deadline_exceeded",
     "clamp_to_node_deadline",
     "cooperative_wait_for",
+    # --- v0.2 hourglass (run-wide budget) ---
+    "Hourglass",
+    "Grant",
+    "Mode",
+    "Reserve",
+    "protected",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0.dev0"
 
 _T = TypeVar("_T")
 
@@ -174,3 +181,8 @@ async def cooperative_wait_for(
     """
     timeout = clamp_to_node_deadline(budget_secs, reserve_secs=reserve_secs)
     return await asyncio.wait_for(awaitable, timeout)
+
+
+# The run-wide budget layer builds on the kernel above. Imported at the end so
+# the kernel names exist before hourglass binds them (no circular-import hazard).
+from .hourglass import Grant, Hourglass, Mode, Reserve, protected  # noqa: E402
