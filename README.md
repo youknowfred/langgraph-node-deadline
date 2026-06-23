@@ -16,7 +16,8 @@ pip install langgraph-node-deadline
 ## The problem
 
 A LangGraph node that does real work has *several layers each re-deriving their
-own clock*: an outer `step_timeout` watchdog, an inner agent/tool budget, a
+own clock*: an outer node-timeout watchdog (`add_node(..., timeout=...)` / a
+`TimeoutPolicy`, or the graph-wide `step_timeout`), an inner agent/tool budget, a
 retry loop, a sub-planner that "wants" 60 seconds. When those clocks disagree,
 the inner layers happily dispatch work the outer watchdog is **guaranteed to
 kill** — and the kill is uncooperative. It cancels the node and **throws away
@@ -61,7 +62,7 @@ python examples/salvage_demo.py
 ```
 
 ```
-Outer watchdog (LangGraph step_timeout): 2.0s  |  inner planner wants ~5s
+Outer watchdog (LangGraph node timeout): 2.0s  |  inner planner wants ~5s
 
   NAIVE   (inner ignores the node deadline)
     -> LOST in 2.00s — outer watchdog cancelled the node, salvage code never ran, ALL work discarded
@@ -74,31 +75,43 @@ Same work, same watchdog. One import decides whether you keep anything.
 
 ## Wiring it into a real LangGraph node
 
-LangGraph's only built-in watchdog is **`step_timeout`** — an attribute on the
-compiled graph that bounds a whole *super-step* and cancels it uncooperatively on
-expiry. (There is no built-in *per-node* timeout, and there is no `TimeoutPolicy`
-class — the only public policies are `RetryPolicy` and `CachePolicy`.) Set your
-node's scope to a hair under that cap, then clamp every inner timed call through it:
+LangGraph cancels a node *uncooperatively* on two kinds of timeout, and the clamp
+works under both:
+
+- **Per-node** — `add_node("research", node, timeout=30)` (a wall-clock cap, or a
+  `TimeoutPolicy(run_timeout=30)` for an idle-timeout variant). On expiry LangGraph
+  raises `NodeTimeoutError` and cancels the node. *(Recent LangGraph; this is the
+  natural "this node gets N seconds" knob.)*
+- **Graph-wide** — `app.step_timeout = 30.0`, which bounds the whole *super-step*
+  (every node running in one parallel tick) and raises `TimeoutError`.
+
+Set your node's scope a hair under whichever cap binds it, then clamp every inner
+timed call through it:
 
 ```python
+from langgraph.types import TimeoutPolicy
 from langgraph_node_deadline import node_deadline_in, clamp_to_node_deadline, cooperative_wait_for
 
-app = graph.compile()
-app.step_timeout = 30.0   # LangGraph's super-step watchdog (cancels uncooperatively)
+NODE_CAP = 30.0
+builder.add_node("research", research_node, timeout=NODE_CAP)  # LangGraph's per-node watchdog
 
 async def research_node(state):
-    with node_deadline_in(app.step_timeout - 1.0):   # leave 1s of grace under the watchdog
+    with node_deadline_in(NODE_CAP - 1.0):   # leave 1s of grace under the node timeout
         # an inner retry loop, sub-agent, or tool call — all clamp to the same deadline
         per_call = clamp_to_node_deadline(15.0, reserve_secs=2.0)  # reserve finalize headroom
         chunks = await cooperative_wait_for(retrieve(state), budget_secs=per_call)
         return {"chunks": chunks}
 ```
 
-> **`step_timeout` is super-step-wide, not per-node.** When nodes run in parallel
-> in one tick, the timeout bounds the *whole tick* and cancels every node in it —
-> so a clamp that perfectly fits your node can still be killed if a *sibling* node
-> overruns the shared step. Size your `node_deadline_in(...)` against the shared
-> `step_timeout`, not against an imagined per-node budget.
+> **If you rely on the graph-wide `step_timeout` instead, it is super-step-wide,
+> not per-node.** When nodes run in parallel in one tick, it bounds the *whole
+> tick* and cancels every node in it — so a clamp that perfectly fits your node can
+> still be killed if a *sibling* overruns the shared step. Size `node_deadline_in`
+> against whichever cap actually binds your node.
+
+> **On older LangGraph** (before the per-node `timeout=` / `TimeoutPolicy`), only
+> `app.step_timeout` exists — set the scope against that. The salvage mechanic is
+> identical; both watchdogs cancel via asyncio cancellation.
 
 Because the deadline lives in a `contextvars.ContextVar`, and `asyncio` copies
 the ambient context when it creates a task, the scope you open before you `await`

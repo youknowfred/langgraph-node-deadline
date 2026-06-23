@@ -3,7 +3,8 @@
 The problem this solves
 -----------------------
 A LangGraph node that does real work usually has *several* layers each
-re-deriving their own clock: an outer ``step_timeout`` watchdog, an inner
+re-deriving their own clock: an outer node-timeout watchdog (a ``TimeoutPolicy``
+or the graph-wide ``step_timeout``), an inner
 agent/tool budget, a retry loop, a sub-planner that "wants" 60 seconds. When
 those clocks disagree, the inner layers dispatch work the outer watchdog is
 guaranteed to kill — and the kill is uncooperative: it cancels the node and

@@ -44,6 +44,10 @@ dependencies = []
 dev = ["pytest>=7", "pytest-asyncio>=0.23"]
 # Static-analysis gate run in CI. Optional; not needed to use the package.
 lint = ["mypy>=1.10", "ruff>=0.5", "vermin>=1.6", "pyright>=1.1.350"]
+# Real-LangGraph integration test only. Optional; NEVER a runtime dependency —
+# the core is and stays stdlib-only. tests/test_langgraph_integration.py is
+# importorskip-guarded, so the suite runs fine without it.
+langgraph = ["langgraph>=0.2"]
 
 [project.urls]
 Homepage = "https://github.com/youknowfred/langgraph-node-deadline"

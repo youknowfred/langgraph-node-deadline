@@ -27,7 +27,7 @@ from langgraph_node_deadline import (
 )
 
 TOTAL = 3.0            # stands in for the run's whole budget (e.g. 20 minutes)
-OUTER_WATCHDOG = 3.3   # the platform-level hard kill (LangGraph's step_timeout)
+OUTER_WATCHDOG = 3.3   # the platform-level hard kill (LangGraph node timeout / step_timeout)
 FINALIZE_FLOOR = 1.2   # runway we protect for writing the answer
 
 

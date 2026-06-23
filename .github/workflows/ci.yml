@@ -43,3 +43,18 @@ jobs:
         run: pyright src/langgraph_node_deadline
       - name: Vermin (3.9 floor holds even with annotations evaluated)
         run: vermin --target=3.9- --eval-annotations --violations src
+
+  integration:
+    # Proves the salvage claim against a real LangGraph StateGraph. Separate from
+    # the matrix so the core stays dependency-light; the test is importorskip-
+    # guarded and skips wherever langgraph is absent.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (with langgraph)
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,langgraph]"
+      - name: Run integration tests against real LangGraph
+        run: pytest -q tests/test_langgraph_integration.py
