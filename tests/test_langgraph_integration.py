@@ -22,7 +22,16 @@ pytest.importorskip("langgraph")
 
 from langgraph.graph import START, END, StateGraph  # noqa: E402
 
-from langgraph_node_deadline import cooperative_wait_for, node_deadline_in  # noqa: E402
+from langgraph_node_deadline import (  # noqa: E402
+    Hourglass,
+    cooperative_wait_for,
+    node_deadline_in,
+)
+from langgraph_node_deadline.langgraph import (  # noqa: E402
+    DeadlineContext,
+    add_budgeted_node,
+    with_grant,
+)
 
 try:
     from typing import TypedDict
@@ -141,3 +150,70 @@ def test_documented_langgraph_surface_exists():
         from langgraph.types import TimeoutPolicy
 
         assert hasattr(TimeoutPolicy(run_timeout=1.0), "run_timeout")
+
+
+# --------------------------------------------------------------------------- #
+# The optional langgraph integration submodule, against a real StateGraph      #
+# --------------------------------------------------------------------------- #
+
+_COOP_CAP = 0.7
+
+
+async def _grantless_research(state):
+    # No node_deadline_in here — the grant opened by with_grant supplies the scope.
+    progress = []
+    try:
+        await cooperative_wait_for(_heavy(progress), budget_secs=10.0)
+    except asyncio.TimeoutError:
+        return {"progress": progress, "outcome": "salvaged"}
+    return {"progress": progress, "outcome": "complete"}
+
+
+async def test_with_grant_salvages_under_step_timeout():
+    g = StateGraph(State, context_schema=DeadlineContext)
+    g.add_node("research", with_grant("research", cap=_COOP_CAP)(_grantless_research))
+    g.add_edge(START, "research")
+    g.add_edge("research", END)
+    app = g.compile()
+    app.step_timeout = _COOP_CAP + 0.5
+    res = await app.ainvoke(
+        {"progress": [], "outcome": ""},
+        context=DeadlineContext(budget=Hourglass(1000)),
+    )
+    assert res["outcome"] == "salvaged"
+    assert 0 < len(res["progress"]) < 500
+
+
+async def test_with_grant_without_budget_runs_fail_open_and_is_killed():
+    # No budget on the context -> with_grant fails open -> no cooperative deadline ->
+    # heavy outlasts the watchdog and the run is killed. The budget is what salvages.
+    g = StateGraph(State, context_schema=DeadlineContext)
+    g.add_node("research", with_grant("research", cap=_COOP_CAP)(_grantless_research))
+    g.add_edge(START, "research")
+    g.add_edge("research", END)
+    app = g.compile()
+    app.step_timeout = _COOP_CAP + 0.5
+    with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+        await app.ainvoke(
+            {"progress": [], "outcome": ""},
+            context=DeadlineContext(budget=None),
+        )
+
+
+@pytest.mark.skipif(
+    not _HAS_PER_NODE_TIMEOUT, reason="add_budgeted_node needs per-node timeout support"
+)
+async def test_add_budgeted_node_derives_watchdog_and_salvages():
+    # add_budgeted_node wires the grant AND sets the node timeout to cap+grace, so the
+    # cooperative deadline always fires before the watchdog.
+    g = StateGraph(State, context_schema=DeadlineContext)
+    add_budgeted_node(g, "research", _grantless_research, cap=_COOP_CAP, grace=0.5)
+    g.add_edge(START, "research")
+    g.add_edge("research", END)
+    app = g.compile()
+    res = await app.ainvoke(
+        {"progress": [], "outcome": ""},
+        context=DeadlineContext(budget=Hourglass(1000)),
+    )
+    assert res["outcome"] == "salvaged"
+    assert 0 < len(res["progress"]) < 500

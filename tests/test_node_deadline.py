@@ -18,13 +18,58 @@ from langgraph_node_deadline import (
     get_node_deadline_remaining_secs,
     node_deadline_exceeded,
     node_deadline_in,
+    node_deadline_in_under,
     node_deadline_scope,
+    recommended_watchdog_secs,
+    run_off_loop,
 )
 
 
 # --------------------------------------------------------------------------- #
 # Fail-open: no scope active                                                   #
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# Watchdog-derivation helpers (the "equal timeouts lose" trap)                 #
+# --------------------------------------------------------------------------- #
+
+def test_recommended_watchdog_secs_adds_grace():
+    assert recommended_watchdog_secs(30) == 31.0          # default 1s grace
+    assert recommended_watchdog_secs(30, grace_secs=2.5) == 32.5
+
+
+def test_node_deadline_in_under_sizes_below_the_watchdog():
+    with node_deadline_in_under(30.0, grace_secs=1.0):
+        rem = get_node_deadline_remaining_secs()
+        assert rem is not None and 28.5 < rem <= 29.0     # watchdog - grace
+    # a watchdog smaller than the grace floors at 0 (never negative)
+    with node_deadline_in_under(0.5, grace_secs=1.0):
+        assert get_node_deadline_remaining_secs() == 0.0
+    # the two helpers are mirror images
+    assert recommended_watchdog_secs(29.0) == 30.0
+
+
+# --------------------------------------------------------------------------- #
+# run_off_loop: carry the deadline into a worker thread                        #
+# --------------------------------------------------------------------------- #
+
+async def test_run_off_loop_carries_deadline_into_thread():
+    def reader():
+        return get_node_deadline_remaining_secs()
+
+    with node_deadline_in(5.0):
+        inside = await run_off_loop(reader)
+    assert inside is not None and 4.0 < inside <= 5.0     # the worker saw the deadline
+    # fail-open: with no active scope the worker reads nothing, like a direct call
+    assert await run_off_loop(reader) is None
+
+
+async def test_run_off_loop_passes_args_and_returns_value():
+    def add(a, b):
+        return a + b
+
+    assert await run_off_loop(add, 2, 3) == 5
+
 
 def test_public_api_surface_is_exported():
     # Guards the README/CHANGELOG against advertising a symbol the package does
@@ -34,11 +79,14 @@ def test_public_api_surface_is_exported():
     for name in (
         "node_deadline",
         "node_deadline_in",
+        "node_deadline_in_under",
         "node_deadline_scope",
         "clamp_to_node_deadline",
+        "recommended_watchdog_secs",
         "cooperative_wait_for",
         "cooperative_poll",
         "aclosing",
+        "run_off_loop",
         "get_node_deadline_remaining_secs",
         "node_deadline_exceeded",
         "Hourglass",
@@ -178,6 +226,30 @@ async def test_cooperative_wait_for_fail_open_without_scope():
 async def _quick():
     await asyncio.sleep(0.01)
     return "done"
+
+
+async def test_cooperative_wait_for_reserve_secs_reduces_the_budget():
+    # reserve_secs is a public knob on a headline function but had no behavioral
+    # coverage. Same deadline, same task: no reserve completes; a large reserve
+    # carves the runway away so the task times out.
+    with node_deadline_in(0.3):
+        assert await cooperative_wait_for(_quick(), budget_secs=5.0) == "done"
+    with node_deadline_in(0.3):
+        with pytest.raises(asyncio.TimeoutError):
+            # ~0.05s budget after a 0.25s reserve -> a 0.15s task can't finish
+            await cooperative_wait_for(
+                asyncio.sleep(0.15), budget_secs=5.0, reserve_secs=0.25
+            )
+
+
+def test_clamp_negative_reserve_is_treated_as_zero_exactly():
+    # A negative reserve must normalize to *exactly* 0 (no reserve), not some other
+    # constant — so the clamp is min(budget, remaining), not min(budget, remaining-1).
+    with node_deadline_in(10.0):
+        rem = get_node_deadline_remaining_secs()
+        assert rem is not None
+        out = clamp_to_node_deadline(100.0, reserve_secs=-5.0)
+        assert out == pytest.approx(rem, abs=0.05)
 
 
 async def test_cooperative_wait_for_returns_already_done_result_at_blown_deadline():

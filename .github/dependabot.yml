@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions fresh — Dependabot bumps both the SHA and
+  # the `# vX.Y.Z` comment, so a pinned action never rots into a stale, unpatched one.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 3
+  # Keep the dev / lint / test tooling current (reads the optional-dependency groups
+  # in pyproject.toml). The core has no runtime dependencies, so nothing else to track.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      dev-tooling:
+        patterns: ["*"]
+    open-pull-requests-limit: 3

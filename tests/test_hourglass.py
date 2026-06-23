@@ -16,6 +16,7 @@ from langgraph_node_deadline import (
     Mode,
     Reserve,
     cooperative_wait_for,
+    get_node_deadline_remaining_secs,
     protected,
 )
 
@@ -102,6 +103,28 @@ def test_validate_rejects_nan_reserve():
 def test_validate_rejects_nan_conserve_margin():
     with pytest.raises(ValueError, match="finite"):
         Hourglass(900, conserve_margin_secs=float("nan")).validate()
+
+
+def test_validate_rejects_negative_conserve_margin_with_message():
+    # Pins the exact message so a mutated/blanked error string is caught.
+    with pytest.raises(ValueError, match="conserve_margin_secs must be >= 0"):
+        Hourglass(100, conserve_margin_secs=-5).validate()
+
+
+def test_validate_accepts_a_small_positive_reserve():
+    # A 0.5s reserve is valid (> 0) — guards the `<= 0` boundary against drifting to `<= 1`.
+    hg = Hourglass(100, {"a": protected(0.5)}, conserve_margin_secs=1)
+    assert hg.validate() is hg
+
+
+def test_natural_mode_halt_boundary_is_exactly_zero():
+    # remaining just above 0 is NOT halt; only exhaustion is — guards `remaining <= 0`.
+    clk = FakeClock()
+    hg = Hourglass(100, clock=clk)
+    clk.tick(99.5)                      # remaining 0.5
+    assert hg.mode != Mode.HALT
+    clk.tick(0.5)                       # remaining 0.0
+    assert hg.mode == Mode.HALT
 
 
 def test_mark_completed_releases_reserve_for_standalone_use():
@@ -270,6 +293,59 @@ async def test_poll_returns_runway_then_raises_after_deadline():
         await asyncio.sleep(0.1)                 # blow past the 0.05 grant
         with pytest.raises(asyncio.TimeoutError):
             await g.poll()
+
+
+async def test_concurrent_grants_track_their_own_active_phase():
+    # The bug this guards: _active_phase used to be a single shared instance slot,
+    # so two reserved grants under asyncio.gather both saw the *last* phase active —
+    # each then excluded the WRONG reserve from its degradation-ladder read. The
+    # active phase is now per-task (a contextvar), so each grant sees its own.
+    hg = Hourglass(1000, {"a": protected(40), "b": protected(40)}).validate()
+    seen = {}
+
+    async def run(name):
+        with hg.grant(name) as g:
+            await asyncio.sleep(0.02)  # force the two grants to overlap
+            seen[name] = (hg._current_active_phase(), g.remaining_secs())
+
+    await asyncio.gather(run("a"), run("b"))
+    assert seen["a"][0] == "a"
+    assert seen["b"][0] == "b"
+    # both share the same wall-clock window (no time-splitting); each got > 0 runway
+    assert seen["a"][1] is not None and seen["a"][1] > 0
+    assert seen["b"][1] is not None and seen["b"][1] > 0
+
+
+async def test_nested_grant_restores_outer_active_phase():
+    # Nested grants used to reset the active phase to None on inner exit instead of
+    # restoring the outer one. Token-based restore (like node_deadline_scope) fixes it.
+    hg = Hourglass(1000, {"research": protected(50), "sub": protected(20)}).validate()
+    assert hg._current_active_phase() is None
+    with hg.grant("research"):
+        assert hg._current_active_phase() == "research"
+        with hg.grant("sub"):
+            assert hg._current_active_phase() == "sub"
+        # inner exited -> outer phase restored, not cleared
+        assert hg._current_active_phase() == "research"
+    assert hg._current_active_phase() is None
+
+
+async def test_fan_out_shares_one_window_across_concurrent_branches():
+    hg = Hourglass(1000, {"finalize": protected(100)}).validate()
+    seen = []
+
+    async def branch(name):
+        await asyncio.sleep(0.01)
+        seen.append((name, get_node_deadline_remaining_secs()))
+
+    with hg.fan_out("research") as g:
+        assert g.phase == "research"
+        await asyncio.gather(branch("a"), branch("b"), branch("c"))
+
+    assert len(seen) == 3
+    for _, rem in seen:  # every branch inherited the one binding deadline (shared window)
+        assert rem is not None and rem > 0
+    assert "research" in hg._completed  # fan_out is a grant — records completion on exit
 
 
 async def test_deadline_predicate_tracks_the_active_grant():

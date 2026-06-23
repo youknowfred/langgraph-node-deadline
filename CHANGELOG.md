@@ -9,6 +9,39 @@ All notable changes to this project are documented here. Format loosely follows
 Grow the node-deadline kernel into a run-wide budget — the first `hourglass`
 layer. Tracks milestone v0.2.0-a in issue #1.
 
+### Added (round-2 hardening + enrichment)
+
+See [`docs/HARDENING_ROUND2.md`](docs/HARDENING_ROUND2.md).
+
+- `recommended_watchdog_secs(cap, *, grace=1.0)` and `node_deadline_in_under(
+  watchdog, *, grace=1.0)` — the two directions of the "never pin the watchdog
+  equal to the cap" guard.
+- `run_off_loop(fn, /, *args, **kwargs)` — run a blocking callable in a worker
+  thread with the binding deadline carried in.
+- `Hourglass.fan_out(phase, *, cap=None)` — `grant()` named for the concurrent
+  pattern; branches under `asyncio.gather` share one wall-clock window.
+- `langgraph_node_deadline.langgraph` — an optional, lazily-imported integration
+  submodule (`DeadlineContext`, `with_grant`, `add_budgeted_node`) that opens a
+  grant around a LangGraph node and derives its watchdog. No runtime dependency;
+  install the `[langgraph]` extra.
+- `tests/test_property.py` — Hypothesis property tests for the clamp/reserve/Mode
+  invariants. A `bench/overhead.py` micro-benchmark (and a README "Overhead"
+  table). `SECURITY.md`, `CONTRIBUTING.md`, and Dependabot.
+
+### Fixed (round 2)
+
+- `Hourglass.mode` read the wrong phase's reserve under `asyncio.gather` and nested
+  grants (`_active_phase` was a single shared instance slot). The active grant is
+  now tracked per-task via a contextvar, so concurrent and nested grants each
+  exclude their own reserve correctly.
+
+### Changed (round 2)
+
+- Supply-chain: SHA-pin all GitHub Actions (Dependabot keeps them fresh); move the
+  PyPI publish action off the floating `release/v1` branch to a tagged release
+  (PEP 740 attestations on by default); add a post-build wheel smoke test and a
+  re-validation step to `release.yml`. CI lint gate now also covers `bench/`.
+
 ### Added
 - `Hourglass(total_secs, reserve={...})` — a run-wide time budget partitioned
   across a multi-node graph, built entirely on the v0.1 kernel.

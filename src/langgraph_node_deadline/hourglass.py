@@ -29,11 +29,17 @@ owed to phases that haven't completed yet ("synthesis", "finalize") — so it ca
 never starve the output. A reserve is released once its phase completes, so the
 last phase gets whatever is left.
 
-Phases are modelled as running **one at a time**. ``grant()`` / ``deadline_for``
-each see the full remaining runway; they do not partition a budget across
-*concurrent* phases (two grants launched under ``asyncio.gather`` would each be
-handed the whole remaining runway). Per-task contextvar isolation still holds,
-but the reserve accounting assumes sequential phases.
+Time is a *shared* budget, not a splittable one. ``grant()`` / ``deadline_for``
+each hand out the full remaining runway — they do **not** partition it across
+*concurrent* phases, and they shouldn't: branches launched under ``asyncio.gather``
+overlap in wall-clock time, so there is nothing to split. They all inherit one
+binding deadline (the kernel contextvar) and correctly share one window. The
+per-phase *reserve* accounting (which reserve a degradation read excludes as "my
+own") is also per-task — a ``grant`` opened inside a ``gather`` branch or nested in
+another grant reads :attr:`Hourglass.mode` against its own reserve. The run-wide
+state — the completed set and the forward-only floor — is shared by design.
+(Splitting a budget across concurrent branches only becomes meaningful for a
+*serial, additive* resource like tokens, which is a separate axis.)
 
 NOTE: ``clock`` is injectable for deterministic tests of the budget *math*; the
 ``grant()`` context manager and the kernel's cooperative helpers assume the
@@ -46,9 +52,10 @@ import asyncio
 import math
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable, Dict, Iterator, Mapping, Optional, Set, Union
+from typing import Callable, Dict, Iterator, Mapping, Optional, Set, Tuple, Union
 
 from . import (
     get_node_deadline_remaining_secs,
@@ -57,6 +64,15 @@ from . import (
 )
 
 __all__ = ["Hourglass", "Grant", "Mode", "Reserve", "protected"]
+
+# Which phase the *current task* is granting, as ``(id(hourglass), phase)`` so it is
+# unambiguous across nested grants (token-restored) and concurrent grants on different
+# instances. Module-level (never per-instance) so it is not leaked/GC-churned. The
+# binding deadline already rides its own contextvar in the kernel; this tracks only
+# the "exclude my own reserve from the ladder" bit, which must likewise be per-task.
+_active_grant: ContextVar[Optional[Tuple[int, str]]] = ContextVar(
+    "hourglass_active_grant", default=None
+)
 
 
 class Mode(IntEnum):
@@ -202,7 +218,6 @@ class Hourglass:
         self._clock = clock
         self._start = clock()
         self._completed: Set[str] = set()
-        self._active_phase: Optional[str] = None
         self._mode_floor = Mode.NORMAL  # forward-only; advanced at grant boundaries
 
     # -- validation ------------------------------------------------------- #
@@ -303,11 +318,22 @@ class Hourglass:
 
     # -- the degradation ladder ------------------------------------------- #
 
+    def _current_active_phase(self) -> Optional[str]:
+        """The phase the *current task* is granting on this instance, if any.
+
+        Read from a per-task contextvar so concurrent grants (under
+        ``asyncio.gather``) and nested grants each exclude the *right* reserve.
+        """
+        active = _active_grant.get()
+        if active is not None and active[0] == id(self):
+            return active[1]
+        return None
+
     def _natural_mode(self) -> Mode:
         """The mode implied by the current runway, ignoring the forward-only
         floor. Excludes the active phase's own reserve (it is spending it)."""
         remaining = self.remaining_secs()
-        pending = self._pending_reserve(exclude=self._active_phase)
+        pending = self._pending_reserve(exclude=self._current_active_phase())
         if remaining <= 0:
             return Mode.HALT
         if remaining <= pending:
@@ -358,14 +384,40 @@ class Hourglass:
         ``cooperative_wait_for`` and every subagent task inherits it — and records
         the phase as completed on exit, **even if the body raises or is
         cancelled**, so its reserve is released to later phases.
+
+        The "active phase" is tracked per-task (a contextvar, token-restored), so a
+        ``grant`` opened inside an ``asyncio.gather`` branch or nested inside another
+        grant still reads :attr:`mode` against its own reserve correctly. The
+        run-wide bookkeeping (completed set, the forward-only floor) is shared, as
+        intended — reserves are released run-wide once a phase finishes.
         """
         deadline = self.deadline_for(phase, cap=cap)
-        self._active_phase = phase
+        token = _active_grant.set((id(self), phase))
         self._ratchet()  # advance the floor on entry
         try:
             with node_deadline_scope(deadline):
                 yield Grant(self, phase, deadline)
         finally:
-            self._active_phase = None
+            _active_grant.reset(token)  # restore the outer phase (or none)
             self._completed.add(phase)
             self._ratchet()  # runway has shrunk; advance again on exit
+
+    @contextmanager
+    def fan_out(self, phase: str, *, cap: Optional[float] = None) -> Iterator["Grant"]:
+        """Open one grant for a phase that runs concurrent branches under it.
+
+        Identical to :meth:`grant`, but named for the intent: launch your parallel
+        work — e.g. ``await asyncio.gather(*sub_queries)`` — *inside* a single
+        ``fan_out`` scope::
+
+            with budget.fan_out("research") as g:
+                results = await asyncio.gather(query_a(), query_b(), query_c())
+
+        Every branch inherits the one binding deadline and shares the same wall-clock
+        window. A time budget is **shared, not split** — concurrent branches overlap
+        in time, so there is nothing to partition, and one slow branch simply uses
+        more of the shared window. (Splitting a budget per-branch only makes sense for
+        a serial, additive resource such as tokens — a separate axis from wall-clock.)
+        """
+        with self.grant(phase, cap=cap) as g:
+            yield g

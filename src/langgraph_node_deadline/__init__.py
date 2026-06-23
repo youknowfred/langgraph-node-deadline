@@ -48,10 +48,11 @@ between the naive path (work discarded) and the clamped path (work salvaged).
 from __future__ import annotations
 
 import asyncio
+import functools
 import math
 import time
 from contextlib import asynccontextmanager, contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from typing import (
     AsyncIterable,
     AsyncIterator,
@@ -68,12 +69,15 @@ __all__ = [
     "node_deadline",
     "node_deadline_scope",
     "node_deadline_in",
+    "node_deadline_in_under",
     "get_node_deadline_remaining_secs",
     "node_deadline_exceeded",
     "clamp_to_node_deadline",
+    "recommended_watchdog_secs",
     "cooperative_wait_for",
     "cooperative_poll",
     "aclosing",
+    "run_off_loop",
     # --- v0.2 hourglass (run-wide budget) ---
     "Hourglass",
     "Grant",
@@ -125,6 +129,22 @@ def node_deadline_in(seconds: float) -> Iterator[None]:
     monotonic timestamps.
     """
     with node_deadline_scope(time.monotonic() + seconds):
+        yield
+
+
+@contextmanager
+def node_deadline_in_under(watchdog_secs: float, *, grace_secs: float = 1.0) -> Iterator[None]:
+    """Open a node deadline a safe ``grace`` *below* a known outer watchdog.
+
+    Use this when the watchdog is the fixed quantity — you know the executor (a
+    LangGraph per-node ``timeout`` / ``step_timeout``) enforces ``watchdog_secs`` —
+    and you want the cooperative deadline to fire first. It is exactly
+    ``node_deadline_in(max(0.0, watchdog_secs - grace_secs))``, so you never have to
+    hand-compute ``CAP - 1.0`` (and never risk getting the sign backwards). The
+    mirror image is :func:`recommended_watchdog_secs`, for when the cap is fixed and
+    you are choosing the watchdog.
+    """
+    with node_deadline_in(max(0.0, watchdog_secs - grace_secs)):
         yield
 
 
@@ -182,6 +202,24 @@ def clamp_to_node_deadline(budget_secs: float, *, reserve_secs: float = 0.0) -> 
     if not math.isfinite(reserve_secs) or reserve_secs < 0.0:
         reserve_secs = 0.0
     return max(0.0, min(budget_secs, remaining - reserve_secs))
+
+
+def recommended_watchdog_secs(cap_secs: float, *, grace_secs: float = 1.0) -> float:
+    """The outer watchdog value to set so the inner cooperative deadline fires first.
+
+    The trap this package leads with is **"equal timeouts lose"**: if the outer
+    watchdog (a LangGraph per-node ``timeout`` / ``step_timeout``) is pinned to the
+    *same* number as your cooperative cap, the watchdog — whose clock starts at node
+    entry, *before* your code runs — wins the race and kills the node before your
+    salvage path runs. Set the watchdog to ``recommended_watchdog_secs(cap)`` (i.e.
+    ``cap + grace``) so the inner deadline always trips first, leaving ``grace``
+    seconds for the ``try/except`` to salvage. ``grace_secs`` is a floor, not a
+    guarantee — pick it generously enough to cover your finalize/return work.
+
+    The mirror image is :func:`node_deadline_in_under`, for when the watchdog is the
+    fixed quantity and you are choosing the cooperative cap.
+    """
+    return cap_secs + grace_secs
 
 
 async def cooperative_wait_for(
@@ -320,6 +358,29 @@ async def aclosing(thing: _T) -> AsyncIterator[_T]:
         aclose = getattr(thing, "aclose", None)
         if aclose is not None:
             await aclose()
+
+
+async def run_off_loop(fn: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:
+    """Run a blocking callable in a worker thread, carrying the node deadline in.
+
+    A plain ``loop.run_in_executor(None, fn)`` does **not** copy the ambient context,
+    so the binding deadline (a contextvar) is invisible inside ``fn`` — any
+    ``clamp_to_node_deadline`` / ``get_node_deadline_remaining_secs`` there fails open
+    as if no scope were active. This helper copies the current context first, so an
+    offloaded sync tool still sees the deadline::
+
+        with node_deadline_in(30):
+            rows = await run_off_loop(blocking_db_query, sql)   # deadline binds inside
+
+    ``asyncio.to_thread`` (3.9+) already copies context, so this is the
+    discoverable, deadline-named entry point — and it pins the contextvar-copy
+    behavior so a refactor can't silently drop it. Fail-open: with no active scope
+    the worker simply reads no deadline, exactly as a direct call would.
+    """
+    loop = asyncio.get_running_loop()
+    ctx = copy_context()
+    func = functools.partial(ctx.run, fn, *args, **kwargs)
+    return await loop.run_in_executor(None, func)
 
 
 # The run-wide budget layer builds on the kernel above. Imported at the end so

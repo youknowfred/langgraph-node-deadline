@@ -92,16 +92,24 @@ timed call through it:
 from langgraph.types import TimeoutPolicy
 from langgraph_node_deadline import node_deadline_in, clamp_to_node_deadline, cooperative_wait_for
 
+from langgraph_node_deadline import node_deadline_in_under
+
 NODE_CAP = 30.0
 builder.add_node("research", research_node, timeout=NODE_CAP)  # LangGraph's per-node watchdog
 
 async def research_node(state):
-    with node_deadline_in(NODE_CAP - 1.0):   # leave 1s of grace under the node timeout
+    with node_deadline_in_under(NODE_CAP):    # a safe grace below the watchdog (no hand math)
         # an inner retry loop, sub-agent, or tool call — all clamp to the same deadline
         per_call = clamp_to_node_deadline(15.0, reserve_secs=2.0)  # reserve finalize headroom
         chunks = await cooperative_wait_for(retrieve(state), budget_secs=per_call)
         return {"chunks": chunks}
 ```
+
+> **Never pin the watchdog equal to your cap** — equal timeouts lose (the watchdog
+> clock starts at node entry, before your code). `node_deadline_in_under(watchdog)`
+> sizes the scope a `grace` *below* a known watchdog; its mirror,
+> `recommended_watchdog_secs(cap)`, gives the watchdog to set for a known cap
+> (`timeout=recommended_watchdog_secs(cap)`). Use whichever quantity you fix first.
 
 > **If you rely on the graph-wide `step_timeout` instead, it is super-step-wide,
 > not per-node.** When nodes run in parallel in one tick, it bounds the *whole
@@ -121,24 +129,63 @@ the deadline through call signatures.
 > **Threads and executors are the exception.** `asyncio.create_task` and
 > `asyncio.to_thread` copy the context, so the deadline carries into them. But a
 > plain `loop.run_in_executor(None, fn)` or a raw `threading.Thread` does **not**
-> copy it — there the helpers fail open (the deadline simply isn't enforced). If
-> you offload a blocking call and want the deadline to bind inside it, copy the
-> context yourself:
+> copy it — there the helpers fail open (the deadline simply isn't enforced). To
+> offload a blocking call *and* keep the deadline binding inside it, use
+> `run_off_loop`, which copies the context for you:
 > ```python
-> import contextvars
-> ctx = contextvars.copy_context()
-> await loop.run_in_executor(None, lambda: ctx.run(blocking_call))
+> from langgraph_node_deadline import run_off_loop
+> with node_deadline_in(30):
+>     rows = await run_off_loop(blocking_db_query, sql)   # deadline binds inside the worker
 > ```
 > (`asyncio.to_thread(blocking_call)` already does this for you.)
+
+### Optional sugar: the `langgraph` submodule
+
+If you'd rather not wire the scope and watchdog by hand, the optional
+`langgraph_node_deadline.langgraph` submodule does both. It threads an `Hourglass`
+through LangGraph's `runtime.context` and opens the grant for you — and
+`add_budgeted_node` sets the node's watchdog to `cap + grace` so you can't pin them
+equal. Install it with `pip install "langgraph-node-deadline[langgraph]"` (still no
+runtime dependency in the core — the import is lazy):
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph_node_deadline import Hourglass, protected, cooperative_wait_for
+from langgraph_node_deadline.langgraph import DeadlineContext, add_budgeted_node
+
+async def research_node(state):                       # a plain node — no manual scope
+    result = await cooperative_wait_for(plan_and_write(state), budget_secs=600)
+    return {"draft": result}
+
+g = StateGraph(State, context_schema=DeadlineContext)
+add_budgeted_node(g, "research", research_node, cap=400)   # opens grant("research") AND sets timeout=cap+grace
+g.add_edge(START, "research"); g.add_edge("research", END)
+app = g.compile()
+
+budget = Hourglass(900, reserve={"finalize": protected(135)})
+await app.ainvoke(state, context=DeadlineContext(budget=budget))
+```
+
+`add_budgeted_node` wraps the node in `grant("research")` and sets the node's
+watchdog to `cap + grace` in one call. (Prefer the explicit `@with_grant("research",
+cap=400)` decorator + a normal `add_node` if you set timeouts yourself.) It uses the
+`runtime.context` hook — not a middleware, which LangGraph has no equivalent of — and
+it's **fail-open**: with no graph runtime or no budget, the node runs exactly as
+written, so the same function still works in a plain unit test.
 
 ## API
 
 | Symbol | What it does |
 | --- | --- |
 | `node_deadline_in(seconds)` | Context manager. Set the binding deadline to `now + seconds`. Use at node entry. |
+| `node_deadline_in_under(watchdog, *, grace=1.0)` | Context manager. Open the scope a `grace` *below* a known outer watchdog (`max(0, watchdog - grace)`) — no hand math, no sign mistakes. |
 | `node_deadline_scope(deadline_monotonic)` | Context manager. Set the deadline to an absolute `time.monotonic()` timestamp (or `None` to clear). `node_deadline` is an alias. |
 | `clamp_to_node_deadline(budget_secs, *, reserve_secs=0.0)` | **The core primitive.** Returns `min(budget_secs, remaining - reserve_secs)`, floored at 0. Returns `budget_secs` unchanged when no scope is active. |
+| `recommended_watchdog_secs(cap, *, grace=1.0)` | `cap + grace` — the outer watchdog to set so the inner deadline fires first. The mirror of `node_deadline_in_under`. |
 | `cooperative_wait_for(awaitable, budget_secs, *, reserve_secs=0.0)` | `asyncio.wait_for` that never outlasts the node deadline. Raises `asyncio.TimeoutError` on the clamped budget. |
+| `cooperative_poll(aiter, *, predicates=None, bound_each_chunk=True)` | Stream an `astream`, stopping cleanly at the deadline (or any predicate) so you keep what you accumulated. |
+| `aclosing(thing)` | Async context manager for deterministic `aclose()` on early exit (a 3.9-compatible `contextlib.aclosing`). |
+| `run_off_loop(fn, /, *args, **kwargs)` | Run a blocking callable in a worker thread with the deadline contextvar carried in. |
 | `get_node_deadline_remaining_secs()` | Seconds left, or `None` if no scope. Never negative. |
 | `node_deadline_exceeded()` | `True` only when a scope is active *and* its deadline has passed. Safe loop guard. |
 
@@ -179,8 +226,21 @@ with budget.grant("finalize"):                  # gets its protected 135s no mat
 - **`validate()` fails loud at startup** on reserves that exceed the total or
   leave no `NORMAL` band — a budget misconfiguration becomes a crash, not a 3am
   cascade.
-- Phases are modelled as running **one at a time** (sequential). Concurrent
-  grants each see the full remaining runway — they don't split it.
+- Reserve accounting is **sequential** (phases run one after another). Time itself
+  is a *shared* budget, not a split one — see fan-out below.
+
+**Concurrent fan-out.** Launch parallel branches *inside one* `grant` (or its alias
+`fan_out`): they all inherit the single binding deadline and share the same
+wall-clock window. A time budget is shared, not split — concurrent branches overlap
+in time, so there is nothing to partition, and `.mode` reads correctly *per branch*:
+
+```python
+with budget.fan_out("research") as g:
+    results = await asyncio.gather(query_a(), query_b(), query_c())  # one shared deadline
+```
+
+(Per-branch *splitting* only makes sense for a serial, additive resource like
+tokens — a separate axis from wall-clock time.)
 
 **Streaming salvage.** `cooperative_poll` wraps an `astream` so the output phase
 keeps whatever it managed to write when the deadline hits — a shorter memo, not a
@@ -255,6 +315,24 @@ This is a small, sharp tool for one failure mode. Reach for something else when:
 
 The kernel is stdlib-only and `asyncio.wait_for`-based under the hood; the value
 isn't new machinery, it's the *discipline* of one deadline instead of four.
+
+## Overhead
+
+The hot-path primitives are effectively free. Per-call cost (`python bench/overhead.py`,
+CPython 3.11, arm64):
+
+| Operation | ns/op |
+| --- | --- |
+| `get_node_deadline_remaining_secs()` — no scope (fail-open) | ~23 |
+| `clamp_to_node_deadline(60)` — no scope (fail-open) | ~58 |
+| `clamp_to_node_deadline(60, reserve_secs=2)` — in scope | ~234 |
+| `node_deadline_in(30)` enter + exit | ~860 |
+| `Hourglass.grant()` enter + exit | ~2700 |
+
+The heaviest operation — a full `grant()` cycle — is ~2.7 microseconds, against
+LLM/tool calls measured in hundreds of milliseconds to seconds. That's 5–6 orders of
+magnitude smaller: the value here is the *discipline* of one deadline, not machinery
+you pay for.
 
 ## Why a package for something so small
 
