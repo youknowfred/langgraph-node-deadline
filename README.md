@@ -316,6 +316,24 @@ This is a small, sharp tool for one failure mode. Reach for something else when:
 The kernel is stdlib-only and `asyncio.wait_for`-based under the hood; the value
 isn't new machinery, it's the *discipline* of one deadline instead of four.
 
+## Overhead
+
+The hot-path primitives are effectively free. Per-call cost (`python bench/overhead.py`,
+CPython 3.11, arm64):
+
+| Operation | ns/op |
+| --- | --- |
+| `get_node_deadline_remaining_secs()` — no scope (fail-open) | ~23 |
+| `clamp_to_node_deadline(60)` — no scope (fail-open) | ~58 |
+| `clamp_to_node_deadline(60, reserve_secs=2)` — in scope | ~234 |
+| `node_deadline_in(30)` enter + exit | ~860 |
+| `Hourglass.grant()` enter + exit | ~2700 |
+
+The heaviest operation — a full `grant()` cycle — is ~2.7 microseconds, against
+LLM/tool calls measured in hundreds of milliseconds to seconds. That's 5–6 orders of
+magnitude smaller: the value here is the *discipline* of one deadline, not machinery
+you pay for.
+
 ## Why a package for something so small
 
 Because the *lesson* is the hard part, not the code. This is the
