@@ -180,6 +180,30 @@ async def _quick():
     return "done"
 
 
+async def test_cooperative_wait_for_reserve_secs_reduces_the_budget():
+    # reserve_secs is a public knob on a headline function but had no behavioral
+    # coverage. Same deadline, same task: no reserve completes; a large reserve
+    # carves the runway away so the task times out.
+    with node_deadline_in(0.3):
+        assert await cooperative_wait_for(_quick(), budget_secs=5.0) == "done"
+    with node_deadline_in(0.3):
+        with pytest.raises(asyncio.TimeoutError):
+            # ~0.05s budget after a 0.25s reserve -> a 0.15s task can't finish
+            await cooperative_wait_for(
+                asyncio.sleep(0.15), budget_secs=5.0, reserve_secs=0.25
+            )
+
+
+def test_clamp_negative_reserve_is_treated_as_zero_exactly():
+    # A negative reserve must normalize to *exactly* 0 (no reserve), not some other
+    # constant — so the clamp is min(budget, remaining), not min(budget, remaining-1).
+    with node_deadline_in(10.0):
+        rem = get_node_deadline_remaining_secs()
+        assert rem is not None
+        out = clamp_to_node_deadline(100.0, reserve_secs=-5.0)
+        assert out == pytest.approx(rem, abs=0.05)
+
+
 async def test_cooperative_wait_for_returns_already_done_result_at_blown_deadline():
     # T2.4: a finished result is salvage, not waste — an already-complete awaitable
     # returns its value even though the deadline has passed; a bare coroutine times out.

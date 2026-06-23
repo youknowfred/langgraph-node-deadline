@@ -41,7 +41,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # Test-only; never installed at runtime (the core stays zero-dependency).
-dev = ["pytest>=7", "pytest-asyncio>=0.23"]
+dev = ["pytest>=7", "pytest-asyncio>=0.23", "hypothesis>=6"]
 # Static-analysis gate run in CI. Optional; not needed to use the package.
 lint = ["mypy>=1.10", "ruff>=0.5", "vermin>=1.6", "pyright>=1.1.350"]
 # Real-LangGraph integration test only. Optional; NEVER a runtime dependency —
