@@ -78,6 +78,32 @@ def test_validate_rejects_margin_that_starts_run_degraded():
         hg.validate()
 
 
+# --------------------------------------------------------------------------- #
+# T1.3 — validate() rejects non-finite envelopes (NaN slips through `<= 0`)    #
+# --------------------------------------------------------------------------- #
+
+def test_validate_rejects_nan_total():
+    # nan <= 0 is False, so without an explicit finiteness check a NaN total
+    # would validate and silently degrade the whole run to HALT.
+    with pytest.raises(ValueError, match="finite"):
+        Hourglass(float("nan")).validate()
+
+
+def test_validate_rejects_inf_total():
+    with pytest.raises(ValueError, match="finite"):
+        Hourglass(float("inf")).validate()
+
+
+def test_validate_rejects_nan_reserve():
+    with pytest.raises(ValueError, match="finite"):
+        Hourglass(900, {"a": protected(float("nan"))}).validate()
+
+
+def test_validate_rejects_nan_conserve_margin():
+    with pytest.raises(ValueError, match="finite"):
+        Hourglass(900, conserve_margin_secs=float("nan")).validate()
+
+
 def test_mark_completed_releases_reserve_for_standalone_use():
     clk = FakeClock()
     hg = Hourglass(900, {"synthesis": protected(160), "finalize": protected(135)}, clock=clk)

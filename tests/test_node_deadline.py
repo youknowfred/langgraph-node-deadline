@@ -11,6 +11,7 @@ import time
 import pytest
 
 from langgraph_node_deadline import (
+    aclosing,
     clamp_to_node_deadline,
     cooperative_poll,
     cooperative_wait_for,
@@ -211,3 +212,125 @@ async def test_cooperative_poll_honors_a_custom_predicate():
         if len(seen) == 3:
             stop["v"] = True  # checked before the next pull -> stops after 3
     assert seen == [0, 1, 2]
+
+
+# --------------------------------------------------------------------------- #
+# T1.1 — custom predicates AUGMENT the deadline guard, never replace it        #
+# --------------------------------------------------------------------------- #
+
+async def _infinite(delay):
+    i = 0
+    while True:
+        await asyncio.sleep(delay)
+        yield i
+        i += 1
+
+
+async def test_cooperative_poll_custom_predicate_still_honors_deadline():
+    """A custom predicate that never trips must not let an active scope be
+    ignored — even with bound_each_chunk=False. Before the fix the custom
+    predicate REPLACED the deadline guard and this never terminated."""
+
+    async def drain():
+        out = []
+        with node_deadline_in(0.2):
+            async for c in cooperative_poll(
+                _infinite(0.01), predicates=[lambda: False], bound_each_chunk=False
+            ):
+                out.append(c)
+        return out
+
+    # The outer timeout turns a regression (infinite loop) into a failure, not a hang.
+    out = await asyncio.wait_for(drain(), timeout=2.0)
+    assert 0 < len(out) < 100  # stopped at the 0.2s deadline
+
+
+# --------------------------------------------------------------------------- #
+# T1.6 — aclosing(): deterministic teardown on early consumer exit             #
+# --------------------------------------------------------------------------- #
+
+async def test_aclosing_closes_upstream_on_consumer_early_exit():
+    closed = {"v": False}
+
+    async def upstream():
+        try:
+            i = 0
+            while True:
+                await asyncio.sleep(0.01)
+                yield i
+                i += 1
+        finally:
+            closed["v"] = True
+
+    seen = []
+    async with aclosing(cooperative_poll(upstream())) as stream:
+        async for c in stream:
+            seen.append(c)
+            if len(seen) == 2:
+                break  # consumer abandons early — aclosing must still tear down
+
+    assert closed["v"] is True  # deterministic close, no GC needed
+    assert seen == [0, 1]
+
+
+async def test_aclosing_yields_all_then_closes_when_consumed_fully():
+    closed = {"v": False}
+
+    async def upstream():
+        try:
+            for i in range(3):
+                yield i
+        finally:
+            closed["v"] = True
+
+    out = []
+    async with aclosing(cooperative_poll(upstream())) as stream:
+        async for c in stream:
+            out.append(c)
+
+    assert out == [0, 1, 2]
+    assert closed["v"] is True
+
+
+# --------------------------------------------------------------------------- #
+# T1.2 / T1.4 — clamp robustness: negative reserve, NaN/inf inputs             #
+# --------------------------------------------------------------------------- #
+
+def test_negative_reserve_does_not_exceed_remaining():
+    with node_deadline_in(10.0):
+        rem = get_node_deadline_remaining_secs()
+        assert rem is not None
+        # a negative reserve must NOT widen the clamp past the binding deadline
+        assert clamp_to_node_deadline(100.0, reserve_secs=-5.0) <= rem + 1e-9
+    # fail-open path is unchanged — no scope returns the budget verbatim
+    assert clamp_to_node_deadline(60.0, reserve_secs=-5.0) == 60.0
+
+
+def test_clamp_nan_and_inf_inputs_are_conservative():
+    with node_deadline_in(10.0):
+        rem = get_node_deadline_remaining_secs()
+        assert rem is not None
+        # NaN budget collapses to 0 (deterministic, not order-dependent)
+        assert clamp_to_node_deadline(float("nan")) == 0.0
+        # NaN reserve is ignored (treated as no reserve), never widens the clamp
+        assert clamp_to_node_deadline(5.0, reserve_secs=float("nan")) <= rem + 1e-9
+        # inf budget clamps DOWN to remaining (not to 0)
+        assert 9.0 < clamp_to_node_deadline(float("inf")) <= 10.0
+    # fail-open: NaN budget passes through untouched with no scope (forgiving)
+    import math as _math
+
+    assert _math.isnan(clamp_to_node_deadline(float("nan")))
+
+
+# --------------------------------------------------------------------------- #
+# T1.5 — cooperative_poll is typed (and its hints resolve on 3.9)              #
+# --------------------------------------------------------------------------- #
+
+def test_cooperative_poll_type_hints_resolve():
+    import typing
+
+    # A PEP 604 ``X | Y`` annotation here would raise on CPython 3.9; the typed
+    # signature must resolve via get_type_hints on every supported version.
+    hints = typing.get_type_hints(cooperative_poll)
+    assert "aiter" in hints
+    assert "return" in hints

@@ -47,10 +47,20 @@ between the naive path (work discarded) and the clamped path (work salvaged).
 from __future__ import annotations
 
 import asyncio
+import math
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Awaitable, Iterator, Optional, TypeVar
+from typing import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Optional,
+    Sequence,
+    TypeVar,
+)
 
 __all__ = [
     # --- v0.1 kernel ---
@@ -62,6 +72,7 @@ __all__ = [
     "clamp_to_node_deadline",
     "cooperative_wait_for",
     "cooperative_poll",
+    "aclosing",
     # --- v0.2 hourglass (run-wide budget) ---
     "Hourglass",
     "Grant",
@@ -148,7 +159,9 @@ def clamp_to_node_deadline(budget_secs: float, *, reserve_secs: float = 0.0) -> 
         budget_secs: The timeout the inner layer *wants*.
         reserve_secs: Headroom to carve below the deadline (e.g. a phase
             transition / finalize buffer) so the clamped work still has time to
-            wrap up before the cooperative cancel.
+            wrap up before the cooperative cancel. Treated as a **non-negative**
+            floor: a negative value is ignored (it would otherwise *widen* the
+            clamp past the binding deadline).
 
     Returns:
         ``budget_secs`` unchanged when no deadline scope is active (fail-open);
@@ -158,6 +171,15 @@ def clamp_to_node_deadline(budget_secs: float, *, reserve_secs: float = 0.0) -> 
     remaining = get_node_deadline_remaining_secs()
     if remaining is None:
         return budget_secs
+    # Active-scope path only — the fail-open return above is untouched. Normalize
+    # hostile inputs so the clamp can never *widen* past the binding deadline:
+    # a NaN budget collapses to 0, and the reserve is a finite, non-negative floor
+    # (a negative/NaN/inf reserve is treated as no reserve). This avoids relying on
+    # CPython's order-dependent min/max NaN semantics.
+    if math.isnan(budget_secs):
+        budget_secs = 0.0
+    if not math.isfinite(reserve_secs) or reserve_secs < 0.0:
+        reserve_secs = 0.0
     return max(0.0, min(budget_secs, remaining - reserve_secs))
 
 
@@ -184,7 +206,12 @@ async def cooperative_wait_for(
     return await asyncio.wait_for(awaitable, timeout)
 
 
-async def cooperative_poll(aiter, *, predicates=None, bound_each_chunk=True):
+async def cooperative_poll(
+    aiter: AsyncIterable[_T],
+    *,
+    predicates: Optional[Sequence[Callable[[], bool]]] = None,
+    bound_each_chunk: bool = True,
+) -> AsyncIterator[_T]:
     """Stream an async iterable, stopping cleanly when the deadline (or any
     predicate) trips — so the consumer keeps whatever it accumulated.
 
@@ -197,21 +224,46 @@ async def cooperative_poll(aiter, *, predicates=None, bound_each_chunk=True):
                 sections.append(chunk)        # whatever arrives before the deadline
         return assemble(sections)             # a complete-but-shorter answer
 
-    Before each chunk it checks the predicates; if any returns ``True`` it stops,
-    closing the underlying iterator. With ``bound_each_chunk`` (default), each
-    pull is *also* clamped to the remaining node-deadline, so a single slow chunk
-    can't overrun. Stopping is **silent** — the ``async for`` just ends and your
-    accumulated chunks are the salvaged partial result; it never raises
-    ``TimeoutError`` at the consumer.
+    Before each chunk it checks the predicates; if any returns ``True`` it stops.
+    With ``bound_each_chunk`` (default), each pull is *also* clamped to the
+    remaining node-deadline, so a single slow chunk can't overrun. Stopping is
+    **silent** — the ``async for`` just ends and your accumulated chunks are the
+    salvaged partial result; it never raises ``TimeoutError`` at the consumer.
+
+    The binding node deadline is **always** a stop condition. Custom
+    ``predicates`` are checked *in addition to* it, never instead of it — so an
+    active scope can never be silently ignored, even with a custom predicate or
+    ``bound_each_chunk=False``.
+
+    Deterministic teardown — read this if you may exit the loop early. When
+    iteration ends *inside* this function (deadline, predicate, or the stream
+    finishing) the underlying iterator's ``aclose()`` runs promptly. But if the
+    **consumer** abandons the ``async for`` early (``return`` / ``break`` /
+    raise), this generator is left suspended at ``yield`` and Python defers its
+    cleanup to async-generator finalization (GC / loop shutdown) — so the upstream
+    stream may stay open longer than you expect. When you might stop early, wrap
+    the stream in :func:`aclosing` to force a deterministic close::
+
+        async with aclosing(cooperative_poll(agent.astream(state))) as stream:
+            async for chunk in stream:
+                sections.append(chunk)
+                if have_enough(sections):
+                    break             # upstream torn down right here, not at GC
 
     Args:
         aiter: Any async iterable / async generator (e.g. an ``astream``).
-        predicates: No-arg callables; iteration stops when any returns ``True``.
-            Defaults to ``[node_deadline_exceeded]`` — so with no active scope it
-            is fail-open and yields everything.
-        bound_each_chunk: Clamp each chunk pull to the remaining node-deadline.
+        predicates: Extra no-arg callables; iteration also stops when any returns
+            ``True``. The node deadline guard is always present, so with no active
+            scope and no predicates this is fail-open and yields everything.
+        bound_each_chunk: Clamp each chunk pull to the remaining node-deadline
+            (default). With ``bound_each_chunk=False`` the deadline is enforced
+            only *between* chunks (a single in-flight pull is not interrupted) — a
+            niche "atomic chunk" opt-out. Note: a pathological iterator that yields
+            without ever awaiting won't hand control back to the event loop until
+            it does, so keep the default unless you specifically need it.
     """
-    preds = list(predicates) if predicates is not None else [node_deadline_exceeded]
+    extra = list(predicates) if predicates is not None else []
+    preds = [node_deadline_exceeded, *extra]  # deadline is ALWAYS a stop condition
     it = aiter.__aiter__()
     try:
         while True:
@@ -237,6 +289,31 @@ async def cooperative_poll(aiter, *, predicates=None, bound_each_chunk=True):
                 await aclose()  # best-effort close so the upstream stream tears down
             except Exception:
                 pass
+
+
+@asynccontextmanager
+async def aclosing(thing: _T) -> AsyncIterator[_T]:
+    """Guarantee ``thing.aclose()`` runs on exit — a 3.9-compatible stand-in for
+    ``contextlib.aclosing`` (which is stdlib only on 3.10+).
+
+    Wrap a :func:`cooperative_poll` (or any ``astream``) when the consumer might
+    leave the ``async for`` early, so the upstream stream is torn down
+    deterministically instead of whenever the garbage collector gets to it::
+
+        async with aclosing(cooperative_poll(agent.astream(state))) as stream:
+            async for chunk in stream:
+                ...
+                if have_enough:
+                    break        # upstream closed here, not at GC
+
+    Like the stdlib version, it does not swallow exceptions raised by ``aclose()``.
+    """
+    try:
+        yield thing
+    finally:
+        aclose = getattr(thing, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 # The run-wide budget layer builds on the kernel above. Imported at the end so

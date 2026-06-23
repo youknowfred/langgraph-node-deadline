@@ -43,6 +43,7 @@ default ``time.monotonic`` clock in production (see ``deadline_for``).
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -209,19 +210,32 @@ class Hourglass:
     def validate(self) -> "Hourglass":
         """Fail loud at startup on an incoherent envelope. Returns self for chaining.
 
-        Raises ``ValueError`` if the total is non-positive, any reserve is
-        non-positive, the reserves sum past the total (you've promised runway you
-        don't have), or the reserves plus the conserve margin leave no ``NORMAL``
-        band at all (the run would start already degraded). Catching these at
-        startup turns a budget misconfiguration into a crash, not a production
-        cascade.
+        Raises ``ValueError`` if the total is non-positive or non-finite, any
+        reserve is non-positive or non-finite, the reserves sum past the total
+        (you've promised runway you don't have), or the reserves plus the conserve
+        margin leave no ``NORMAL`` band at all (the run would start already
+        degraded). Catching these at startup turns a budget misconfiguration into a
+        crash, not a production cascade. The finiteness checks come first so a
+        ``NaN`` from upstream config arithmetic can't slip through ``nan <= 0``.
         """
+        if not math.isfinite(self.total_secs):
+            raise ValueError(
+                f"total_secs must be a finite number, got {self.total_secs}"
+            )
         if self.total_secs <= 0:
             raise ValueError(f"total_secs must be > 0, got {self.total_secs}")
+        if not math.isfinite(self._conserve_margin):
+            raise ValueError(
+                f"conserve_margin_secs must be finite, got {self._conserve_margin}"
+            )
         if self._conserve_margin < 0:
             raise ValueError("conserve_margin_secs must be >= 0")
         total_reserved = 0.0
         for phase, r in self._reserve.items():
+            if not math.isfinite(r.secs):
+                raise ValueError(
+                    f"reserve for '{phase}' must be finite, got {r.secs}"
+                )
             if r.secs <= 0:
                 raise ValueError(f"reserve for '{phase}' must be > 0, got {r.secs}")
             total_reserved += r.secs
