@@ -7,8 +7,12 @@ hardening PRs that follow; nothing here weakens the package's two load-bearing
 guarantees — **fail-open** (no active scope ⇒ every function behaves as if absent)
 and **zero runtime dependencies** (the core imports stdlib only).
 
-> Status: **audit complete, fixes pending.** Tiers are executed in order, each as a
-> reviewed, CI-green PR. Owner sign-off is requested between tiers.
+> Status: **audit complete; Tiers 1–4 implemented and CI-green** on
+> [PR #2](https://github.com/youknowfred/langgraph-node-deadline/pull/2)
+> (folded into the v0.2 line). 59 tests pass (54 unit + 5 LangGraph integration);
+> `ruff` / `mypy --strict` / `pyright` / `vermin` (3.9) clean. The only remaining
+> launch step is a tagged release through the new Trusted-Publishing workflow
+> (owner action; not done here).
 
 ## How this was produced
 
