@@ -1,10 +1,13 @@
 [build-system]
-requires = ["hatchling"]
+# hatchling >= 1.27 is required to emit PEP 639 SPDX license metadata
+# (Metadata-Version 2.4 / License-Expression). Older backends silently downgrade
+# to free-text License or hard-fail in non-isolated builds, so pin the floor.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "langgraph-node-deadline"
-version = "0.2.0.dev0"
+version = "0.2.0"
 description = "One binding deadline for every inner timeout in a LangGraph node — clamp inner budgets to the cooperative deadline so work salvages instead of getting killed by the watchdog."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -37,7 +40,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+# Test-only; never installed at runtime (the core stays zero-dependency).
 dev = ["pytest>=7", "pytest-asyncio>=0.23"]
+# Static-analysis gate run in CI. Optional; not needed to use the package.
+lint = ["mypy>=1.10", "ruff>=0.5", "vermin>=1.6", "pyright>=1.1.350"]
 
 [project.urls]
 Homepage = "https://github.com/youknowfred/langgraph-node-deadline"

@@ -48,7 +48,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable, Dict, Iterator, Mapping, Optional, Union
+from typing import Callable, Dict, Iterator, Mapping, Optional, Set, Union
 
 from . import (
     get_node_deadline_remaining_secs,
@@ -201,7 +201,7 @@ class Hourglass:
         )
         self._clock = clock
         self._start = clock()
-        self._completed: set[str] = set()
+        self._completed: Set[str] = set()
         self._active_phase: Optional[str] = None
         self._mode_floor = Mode.NORMAL  # forward-only; advanced at grant boundaries
 

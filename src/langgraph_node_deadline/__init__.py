@@ -81,7 +81,7 @@ __all__ = [
     "protected",
 ]
 
-__version__ = "0.2.0.dev0"
+__version__ = "0.2.0"
 
 _T = TypeVar("_T")
 

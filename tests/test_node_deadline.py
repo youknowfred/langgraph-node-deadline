@@ -26,6 +26,31 @@ from langgraph_node_deadline import (
 # Fail-open: no scope active                                                   #
 # --------------------------------------------------------------------------- #
 
+def test_public_api_surface_is_exported():
+    # Guards the README/CHANGELOG against advertising a symbol the package does
+    # not actually export (e.g. installing a pre-release that predates the API).
+    import langgraph_node_deadline as m
+
+    for name in (
+        "node_deadline",
+        "node_deadline_in",
+        "node_deadline_scope",
+        "clamp_to_node_deadline",
+        "cooperative_wait_for",
+        "cooperative_poll",
+        "aclosing",
+        "get_node_deadline_remaining_secs",
+        "node_deadline_exceeded",
+        "Hourglass",
+        "Grant",
+        "Mode",
+        "Reserve",
+        "protected",
+    ):
+        assert hasattr(m, name), f"missing public symbol: {name}"
+        assert name in m.__all__, f"{name} not in __all__"
+
+
 def test_no_scope_is_fail_open():
     assert get_node_deadline_remaining_secs() is None
     assert node_deadline_exceeded() is False

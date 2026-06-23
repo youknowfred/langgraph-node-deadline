@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] — unreleased (in progress on the `v0.2` branch)
+## [0.2.0] — unreleased (launch candidate)
 
 Grow the node-deadline kernel into a run-wide budget — the first `hourglass`
 layer. Tracks milestone v0.2.0-a in issue #1.
@@ -30,6 +30,28 @@ layer. Tracks milestone v0.2.0-a in issue #1.
   at the consumer.
 - `examples/hourglass_demo.py` — the hero demo: a heavy input returns a
   complete-but-shorter memo instead of timing out into nothing.
+- `aclosing(...)` — a 3.9-compatible `contextlib.aclosing` stand-in for
+  deterministic upstream teardown when a `cooperative_poll` consumer exits early.
+
+### Changed (pre-launch hardening)
+
+Findings from a security + compatibility audit (see
+[`docs/PRELAUNCH_HARDENING.md`](docs/PRELAUNCH_HARDENING.md)):
+
+- `cooperative_poll` now treats custom `predicates` as *additional* stop
+  conditions; the binding node deadline is always honored, so an active scope can
+  never be silently ignored.
+- `cooperative_poll` is fully type-annotated (clean under `mypy --strict`).
+- `clamp_to_node_deadline` treats `reserve_secs` as a non-negative floor and
+  normalizes NaN/inf, so the clamp can never widen past the deadline.
+- `Hourglass.validate()` rejects non-finite `total_secs` / reserves /
+  `conserve_margin` (a `NaN` no longer slips through `nan <= 0`).
+- Docs corrected: the LangGraph watchdog is `step_timeout` (super-step-wide),
+  not the non-existent `TimeoutPolicy`; thread/executor context-propagation is
+  documented accurately; added a "when NOT to use this" comparison.
+- Packaging/CI: pinned `hatchling>=1.27` for deterministic PEP 639 license
+  metadata; added `mypy`/`pyright`/`ruff`/`vermin` and a deprecation-as-error
+  gate to CI; added a Trusted-Publishing (OIDC) release workflow.
 
 v0.2 is feature-complete for the v0.2.0-a milestone in issue #1.
 

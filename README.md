@@ -5,7 +5,7 @@ budgets to the node's cooperative deadline so heavy work **salvages a partial
 result** instead of getting hard-killed by the watchdog and discarding everything.
 
 Zero runtime dependencies. Python 3.9+. The kernel is ~120 lines; an optional
-`Hourglass` budget layer ([v0.2](#run-wide-budgets-hourglass-v02--in-progress)) builds on it.
+`Hourglass` budget layer ([v0.2](#run-wide-budgets-hourglass-v02)) builds on it.
 
 ```bash
 pip install langgraph-node-deadline
@@ -133,7 +133,7 @@ the deadline through call signatures.
 weren't there — so adding it to one node never changes the behavior of the rest
 of your graph, your tests, or direct invocations.
 
-## Run-wide budgets: `Hourglass` (v0.2 — in progress)
+## Run-wide budgets: `Hourglass` (v0.2)
 
 The kernel protects one node. `Hourglass` is the optional layer that spreads a
 single time budget across a whole graph and **guarantees your output phase its
@@ -208,9 +208,9 @@ python examples/hourglass_demo.py
 #   HOURGLASS -> 5-section memo from 7 findings (ended in mode=halt)
 ```
 
-> `Hourglass` lives on the `v0.2` branch, tracked in
+> `Hourglass` ships in `0.2.0`, tracked in
 > [issue #1](https://github.com/youknowfred/langgraph-node-deadline/issues/1).
-> The kernel above is stable and shipped in `0.1.0`.
+> The kernel (everything above this section) shipped in `0.1.0` and is stable.
 
 ## When NOT to use this
 
