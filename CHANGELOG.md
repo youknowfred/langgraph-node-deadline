@@ -28,6 +28,20 @@ See [`docs/HARDENING_ROUND2.md`](docs/HARDENING_ROUND2.md).
   invariants. A `bench/overhead.py` micro-benchmark (and a README "Overhead"
   table). `SECURITY.md`, `CONTRIBUTING.md`, and Dependabot.
 
+### Added (strong nice-to-have fast-follow)
+
+- `collect_until_deadline(aiter, *, predicates=None, max_items=None)` — the batch
+  sibling of `cooperative_poll`: drains an `astream` under the binding deadline and
+  **returns** the accumulated list, tearing the upstream down deterministically
+  (including the `max_items` early break) so the consumer needn't hand-manage the
+  accumulator and the `aclosing` teardown.
+- CI now enforces a **90% branch-coverage gate** (`pytest-cov`, in the existing
+  `test` matrix step — not a separate job); the gated core kernel + hourglass are at
+  100%. The lazily-imported `langgraph` submodule is excluded (it is covered by the
+  separate, langgraph-gated integration job).
+- **OpenSSF Scorecard** workflow (`.github/workflows/scorecard.yml`) and README
+  badge — weekly + on-push supply-chain scoring, SARIF uploaded to the Security tab.
+
 ### Fixed (round 2)
 
 - `Hourglass.mode` read the wrong phase's reserve under `asyncio.gather` and nested

@@ -59,6 +59,7 @@ from typing import (
     Awaitable,
     Callable,
     Iterator,
+    List,
     Optional,
     Sequence,
     TypeVar,
@@ -76,6 +77,7 @@ __all__ = [
     "recommended_watchdog_secs",
     "cooperative_wait_for",
     "cooperative_poll",
+    "collect_until_deadline",
     "aclosing",
     "run_off_loop",
     # --- v0.2 hourglass (run-wide budget) ---
@@ -358,6 +360,53 @@ async def aclosing(thing: _T) -> AsyncIterator[_T]:
         aclose = getattr(thing, "aclose", None)
         if aclose is not None:
             await aclose()
+
+
+async def collect_until_deadline(
+    aiter: AsyncIterable[_T],
+    *,
+    predicates: Optional[Sequence[Callable[[], bool]]] = None,
+    max_items: Optional[int] = None,
+) -> List[_T]:
+    """Drain an ``astream`` under the binding deadline and **return** the accumulated
+    list — the batch sibling of :func:`cooperative_poll`.
+
+    ``cooperative_poll`` is the streaming primitive; most consumers, though, just want
+    the salvaged chunks back as a list without hand-managing the accumulator *and* the
+    early-exit teardown. This does both: it iterates ``cooperative_poll`` inside an
+    :func:`aclosing` block — so the upstream stream is torn down deterministically the
+    moment iteration ends, including the ``max_items`` early break — and returns
+    whatever it collected::
+
+        with budget.grant("finalize"):
+            sections = await collect_until_deadline(agent.astream(state))
+        return assemble(sections)              # complete-but-shorter, never nothing
+
+    Stopping is **silent**, exactly as in ``cooperative_poll``: when the deadline (or any
+    custom predicate) trips, iteration just ends and the returned list is the salvaged
+    partial result — it never raises ``TimeoutError`` at the consumer. Use
+    :func:`node_deadline_exceeded` afterwards if you need to tell a truncated result
+    from a complete one.
+
+    Args:
+        aiter: Any async iterable / async generator (e.g. an ``astream``).
+        predicates: Extra no-arg stop conditions, forwarded to ``cooperative_poll``;
+            the binding node deadline is *always* honored in addition to them.
+        max_items: Stop after this many items (and tear the upstream down right then).
+            ``None`` (default) means "until the deadline or the stream ends."
+
+    Returns:
+        The chunks collected before iteration stopped. With no active deadline scope
+        and no predicates/cap this is fail-open and returns everything the stream
+        yields.
+    """
+    out: List[_T] = []
+    async with aclosing(cooperative_poll(aiter, predicates=predicates)) as stream:
+        async for chunk in stream:
+            out.append(chunk)
+            if max_items is not None and len(out) >= max_items:
+                break
+    return out
 
 
 async def run_off_loop(fn: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:

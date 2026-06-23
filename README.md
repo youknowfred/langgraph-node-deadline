@@ -184,6 +184,7 @@ written, so the same function still works in a plain unit test.
 | `recommended_watchdog_secs(cap, *, grace=1.0)` | `cap + grace` — the outer watchdog to set so the inner deadline fires first. The mirror of `node_deadline_in_under`. |
 | `cooperative_wait_for(awaitable, budget_secs, *, reserve_secs=0.0)` | `asyncio.wait_for` that never outlasts the node deadline. Raises `asyncio.TimeoutError` on the clamped budget. |
 | `cooperative_poll(aiter, *, predicates=None, bound_each_chunk=True)` | Stream an `astream`, stopping cleanly at the deadline (or any predicate) so you keep what you accumulated. |
+| `collect_until_deadline(aiter, *, predicates=None, max_items=None)` | Batch sibling of `cooperative_poll`: drains the stream under the deadline and **returns** the accumulated list, with deterministic upstream teardown (incl. the `max_items` early break). |
 | `aclosing(thing)` | Async context manager for deterministic `aclose()` on early exit (a 3.9-compatible `contextlib.aclosing`). |
 | `run_off_loop(fn, /, *args, **kwargs)` | Run a blocking callable in a worker thread with the deadline contextvar carried in. |
 | `get_node_deadline_remaining_secs()` | Seconds left, or `None` if no scope. Never negative. |
@@ -255,6 +256,19 @@ with budget.grant("finalize"):
                                         predicates=[budget.deadline_predicate()]):
         sections.append(chunk)          # every section that lands before the deadline
 return assemble(sections)               # complete-but-shorter, never nothing
+```
+
+If you just want the salvaged chunks back as a list — and don't want to hand-manage
+the accumulator *and* the early-exit teardown — `collect_until_deadline` does both,
+returning what it collected and closing the upstream deterministically (including the
+`max_items` early stop):
+
+```python
+from langgraph_node_deadline import collect_until_deadline
+
+with budget.grant("finalize"):
+    sections = await collect_until_deadline(agent.astream(state), max_items=12)
+return assemble(sections)               # same salvage, one line
 ```
 
 Custom `predicates` are checked *in addition to* the binding deadline, never

@@ -13,6 +13,7 @@ import pytest
 from langgraph_node_deadline import (
     aclosing,
     clamp_to_node_deadline,
+    collect_until_deadline,
     cooperative_poll,
     cooperative_wait_for,
     get_node_deadline_remaining_secs,
@@ -85,6 +86,7 @@ def test_public_api_surface_is_exported():
         "recommended_watchdog_secs",
         "cooperative_wait_for",
         "cooperative_poll",
+        "collect_until_deadline",
         "aclosing",
         "run_off_loop",
         "get_node_deadline_remaining_secs",
@@ -464,6 +466,68 @@ async def test_aclosing_propagates_aclose_errors():
     with pytest.raises(RuntimeError, match="aclose boom"):
         async with aclosing(_RaisingClose()):
             pass
+
+
+# --------------------------------------------------------------------------- #
+# collect_until_deadline: the batch sibling of cooperative_poll                 #
+# --------------------------------------------------------------------------- #
+
+
+async def test_collect_until_deadline_returns_early_chunks_on_deadline():
+    # A 100-item generator at 0.1s/item under a 0.25s deadline returns only the
+    # early chunks (salvage), in order — not all 100.
+    with node_deadline_in(0.25):
+        out = await collect_until_deadline(_gen(100, delay=0.1))
+        assert node_deadline_exceeded()   # truncation is detectable inside the scope
+    assert 0 < len(out) < 100
+    assert out == list(range(len(out)))   # the early, in-order chunks
+
+
+async def test_collect_until_deadline_is_fail_open_without_scope():
+    out = await collect_until_deadline(_gen(5))
+    assert out == [0, 1, 2, 3, 4]         # no scope -> everything
+
+
+async def test_collect_until_deadline_max_items_caps_and_tears_down():
+    closed = {"v": False}
+
+    async def upstream():
+        try:
+            i = 0
+            while True:
+                yield i
+                i += 1
+        finally:
+            closed["v"] = True            # ran iff the upstream was torn down
+
+    out = await collect_until_deadline(upstream(), max_items=3)
+    assert out == [0, 1, 2]               # capped at max_items
+    assert closed["v"] is True            # aclosing tore the upstream down at the break
+
+
+async def test_collect_until_deadline_honors_custom_predicate():
+    stop = {"v": False}
+
+    def make_stop():
+        # trips after 2 items have been pulled (checked before the next pull)
+        return stop["v"]
+
+    async def gen():
+        for i in range(10):
+            if i == 2:
+                stop["v"] = True
+            yield i
+
+    out = await collect_until_deadline(gen(), predicates=[make_stop])
+    assert out == [0, 1, 2]
+
+
+def test_collect_until_deadline_type_hints_resolve():
+    import typing
+
+    # No PEP 604 `X | Y` annotations — get_type_hints must resolve on 3.9-3.13.
+    hints = typing.get_type_hints(collect_until_deadline)
+    assert "aiter" in hints and "max_items" in hints
 
 
 # --------------------------------------------------------------------------- #
