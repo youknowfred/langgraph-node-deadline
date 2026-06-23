@@ -1,5 +1,7 @@
 # langgraph-node-deadline
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/youknowfred/langgraph-node-deadline/badge)](https://scorecard.dev/viewer/?uri=github.com/youknowfred/langgraph-node-deadline)
+
 **One binding deadline for every inner timeout in a LangGraph node.** Clamp inner
 budgets to the node's cooperative deadline so heavy work **salvages a partial
 result** instead of getting hard-killed by the watchdog and discarding everything.
