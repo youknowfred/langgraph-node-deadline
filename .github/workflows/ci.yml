@@ -19,7 +19,42 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
-      - name: Run tests
-        run: pytest -q
-      - name: Run the demo
-        run: python examples/salvage_demo.py
+      - name: Run tests (deprecations are errors)
+        run: pytest -q -W error::DeprecationWarning -W error::PendingDeprecationWarning
+      - name: Run the demos
+        run: |
+          python examples/salvage_demo.py
+          python examples/hourglass_demo.py
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e ".[lint]"
+      - name: Ruff
+        run: ruff check src tests examples
+      - name: Mypy (strict, public surface)
+        run: mypy --strict src/langgraph_node_deadline
+      - name: Pyright
+        run: pyright src/langgraph_node_deadline
+      - name: Vermin (3.9 floor holds even with annotations evaluated)
+        run: vermin --target=3.9- --eval-annotations --violations src
+
+  integration:
+    # Proves the salvage claim against a real LangGraph StateGraph. Separate from
+    # the matrix so the core stays dependency-light; the test is importorskip-
+    # guarded and skips wherever langgraph is absent.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (with langgraph)
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,langgraph]"
+      - name: Run integration tests against real LangGraph
+        run: pytest -q tests/test_langgraph_integration.py
