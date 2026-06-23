@@ -401,3 +401,23 @@ class Hourglass:
             _active_grant.reset(token)  # restore the outer phase (or none)
             self._completed.add(phase)
             self._ratchet()  # runway has shrunk; advance again on exit
+
+    @contextmanager
+    def fan_out(self, phase: str, *, cap: Optional[float] = None) -> Iterator["Grant"]:
+        """Open one grant for a phase that runs concurrent branches under it.
+
+        Identical to :meth:`grant`, but named for the intent: launch your parallel
+        work — e.g. ``await asyncio.gather(*sub_queries)`` — *inside* a single
+        ``fan_out`` scope::
+
+            with budget.fan_out("research") as g:
+                results = await asyncio.gather(query_a(), query_b(), query_c())
+
+        Every branch inherits the one binding deadline and shares the same wall-clock
+        window. A time budget is **shared, not split** — concurrent branches overlap
+        in time, so there is nothing to partition, and one slow branch simply uses
+        more of the shared window. (Splitting a budget per-branch only makes sense for
+        a serial, additive resource such as tokens — a separate axis from wall-clock.)
+        """
+        with self.grant(phase, cap=cap) as g:
+            yield g

@@ -16,6 +16,7 @@ from langgraph_node_deadline import (
     Mode,
     Reserve,
     cooperative_wait_for,
+    get_node_deadline_remaining_secs,
     protected,
 )
 
@@ -327,6 +328,24 @@ async def test_nested_grant_restores_outer_active_phase():
         # inner exited -> outer phase restored, not cleared
         assert hg._current_active_phase() == "research"
     assert hg._current_active_phase() is None
+
+
+async def test_fan_out_shares_one_window_across_concurrent_branches():
+    hg = Hourglass(1000, {"finalize": protected(100)}).validate()
+    seen = []
+
+    async def branch(name):
+        await asyncio.sleep(0.01)
+        seen.append((name, get_node_deadline_remaining_secs()))
+
+    with hg.fan_out("research") as g:
+        assert g.phase == "research"
+        await asyncio.gather(branch("a"), branch("b"), branch("c"))
+
+    assert len(seen) == 3
+    for _, rem in seen:  # every branch inherited the one binding deadline (shared window)
+        assert rem is not None and rem > 0
+    assert "research" in hg._completed  # fan_out is a grant — records completion on exit
 
 
 async def test_deadline_predicate_tracks_the_active_grant():
