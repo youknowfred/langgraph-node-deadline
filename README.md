@@ -139,6 +139,40 @@ the deadline through call signatures.
 > ```
 > (`asyncio.to_thread(blocking_call)` already does this for you.)
 
+### Optional sugar: the `langgraph` submodule
+
+If you'd rather not wire the scope and watchdog by hand, the optional
+`langgraph_node_deadline.langgraph` submodule does both. It threads an `Hourglass`
+through LangGraph's `runtime.context` and opens the grant for you — and
+`add_budgeted_node` sets the node's watchdog to `cap + grace` so you can't pin them
+equal. Install it with `pip install "langgraph-node-deadline[langgraph]"` (still no
+runtime dependency in the core — the import is lazy):
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph_node_deadline import Hourglass, protected, cooperative_wait_for
+from langgraph_node_deadline.langgraph import DeadlineContext, add_budgeted_node
+
+async def research_node(state):                       # a plain node — no manual scope
+    result = await cooperative_wait_for(plan_and_write(state), budget_secs=600)
+    return {"draft": result}
+
+g = StateGraph(State, context_schema=DeadlineContext)
+add_budgeted_node(g, "research", research_node, cap=400)   # opens grant("research") AND sets timeout=cap+grace
+g.add_edge(START, "research"); g.add_edge("research", END)
+app = g.compile()
+
+budget = Hourglass(900, reserve={"finalize": protected(135)})
+await app.ainvoke(state, context=DeadlineContext(budget=budget))
+```
+
+`add_budgeted_node` wraps the node in `grant("research")` and sets the node's
+watchdog to `cap + grace` in one call. (Prefer the explicit `@with_grant("research",
+cap=400)` decorator + a normal `add_node` if you set timeouts yourself.) It uses the
+`runtime.context` hook — not a middleware, which LangGraph has no equivalent of — and
+it's **fail-open**: with no graph runtime or no budget, the node runs exactly as
+written, so the same function still works in a plain unit test.
+
 ## API
 
 | Symbol | What it does |
