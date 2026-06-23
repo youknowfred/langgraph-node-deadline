@@ -8,9 +8,10 @@ Two nodes do the SAME work and live under the SAME outer watchdog. The only
 difference is whether the inner planner clamps its budget to the binding node
 deadline. One loses everything; one salvages a partial result.
 
-This simulates a LangGraph node wrapped in a ``TimeoutPolicy`` watchdog. No
-LangGraph install is needed — ``asyncio.wait_for`` plays the role of the
-watchdog so you can see the mechanics directly.
+This simulates a LangGraph node under ``step_timeout`` (LangGraph's only built-in
+watchdog — it bounds the whole super-step and cancels uncooperatively). No
+LangGraph install is needed — ``asyncio.wait_for`` stands in for ``step_timeout``
+so you can see the mechanics directly.
 """
 
 import asyncio
@@ -18,7 +19,7 @@ import time
 
 from langgraph_node_deadline import node_deadline_in, cooperative_wait_for
 
-OUTER_WATCHDOG = 2.0  # simulates LangGraph TimeoutPolicy on the node (kills uncooperatively)
+OUTER_WATCHDOG = 2.0  # stands in for LangGraph's step_timeout (cancels uncooperatively)
 NODE_CAP = 1.8        # the cooperative deadline we enforce INSIDE the node (fires first)
 
 
@@ -70,7 +71,7 @@ async def run(label, node):
 
 async def main():
     print(
-        f"\nOuter watchdog (LangGraph TimeoutPolicy): {OUTER_WATCHDOG}s"
+        f"\nOuter watchdog (LangGraph step_timeout): {OUTER_WATCHDOG}s"
         f"  |  inner planner wants ~5s\n"
     )
     await run("NAIVE   (inner ignores the node deadline)", naive_node)

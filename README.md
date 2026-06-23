@@ -16,7 +16,7 @@ pip install langgraph-node-deadline
 ## The problem
 
 A LangGraph node that does real work has *several layers each re-deriving their
-own clock*: an outer `TimeoutPolicy` watchdog, an inner agent/tool budget, a
+own clock*: an outer `step_timeout` watchdog, an inner agent/tool budget, a
 retry loop, a sub-planner that "wants" 60 seconds. When those clocks disagree,
 the inner layers happily dispatch work the outer watchdog is **guaranteed to
 kill** — and the kill is uncooperative. It cancels the node and **throws away
@@ -61,7 +61,7 @@ python examples/salvage_demo.py
 ```
 
 ```
-Outer watchdog (LangGraph TimeoutPolicy): 2.0s  |  inner planner wants ~5s
+Outer watchdog (LangGraph step_timeout): 2.0s  |  inner planner wants ~5s
 
   NAIVE   (inner ignores the node deadline)
     -> LOST in 2.00s — outer watchdog cancelled the node, salvage code never ran, ALL work discarded
@@ -74,26 +74,49 @@ Same work, same watchdog. One import decides whether you keep anything.
 
 ## Wiring it into a real LangGraph node
 
-Set the scope to a hair under whatever cap the executor enforces, then clamp
-every inner timed call through it:
+LangGraph's only built-in watchdog is **`step_timeout`** — an attribute on the
+compiled graph that bounds a whole *super-step* and cancels it uncooperatively on
+expiry. (There is no built-in *per-node* timeout, and there is no `TimeoutPolicy`
+class — the only public policies are `RetryPolicy` and `CachePolicy`.) Set your
+node's scope to a hair under that cap, then clamp every inner timed call through it:
 
 ```python
 from langgraph_node_deadline import node_deadline_in, clamp_to_node_deadline, cooperative_wait_for
 
-NODE_CAP_SECS = 30.0   # match this to your TimeoutPolicy, minus a small grace
+app = graph.compile()
+app.step_timeout = 30.0   # LangGraph's super-step watchdog (cancels uncooperatively)
 
 async def research_node(state):
-    with node_deadline_in(NODE_CAP_SECS - 1.0):   # leave 1s of grace under the watchdog
+    with node_deadline_in(app.step_timeout - 1.0):   # leave 1s of grace under the watchdog
         # an inner retry loop, sub-agent, or tool call — all clamp to the same deadline
         per_call = clamp_to_node_deadline(15.0, reserve_secs=2.0)  # reserve finalize headroom
         chunks = await cooperative_wait_for(retrieve(state), budget_secs=per_call)
         return {"chunks": chunks}
 ```
 
+> **`step_timeout` is super-step-wide, not per-node.** When nodes run in parallel
+> in one tick, the timeout bounds the *whole tick* and cancels every node in it —
+> so a clamp that perfectly fits your node can still be killed if a *sibling* node
+> overruns the shared step. Size your `node_deadline_in(...)` against the shared
+> `step_timeout`, not against an imagined per-node budget.
+
 Because the deadline lives in a `contextvars.ContextVar`, and `asyncio` copies
-the ambient context when it creates a task, the scope you open before you
-`await` is visible to the agent task **and every subagent task it spawns** — no
-threading the deadline through call signatures.
+the ambient context when it creates a task, the scope you open before you `await`
+is visible to the agent task **and every asyncio task it spawns** — no threading
+the deadline through call signatures.
+
+> **Threads and executors are the exception.** `asyncio.create_task` and
+> `asyncio.to_thread` copy the context, so the deadline carries into them. But a
+> plain `loop.run_in_executor(None, fn)` or a raw `threading.Thread` does **not**
+> copy it — there the helpers fail open (the deadline simply isn't enforced). If
+> you offload a blocking call and want the deadline to bind inside it, copy the
+> context yourself:
+> ```python
+> import contextvars
+> ctx = contextvars.copy_context()
+> await loop.run_in_executor(None, lambda: ctx.run(blocking_call))
+> ```
+> (`asyncio.to_thread(blocking_call)` already does this for you.)
 
 ## API
 
@@ -161,6 +184,22 @@ with budget.grant("finalize"):
 return assemble(sections)               # complete-but-shorter, never nothing
 ```
 
+Custom `predicates` are checked *in addition to* the binding deadline, never
+instead of it — an active scope is always honored. If you might leave the
+`async for` **early** (`break`/`return` once you have enough), wrap the stream in
+`aclosing` so the upstream `astream` is torn down right then instead of whenever
+the garbage collector gets to it:
+
+```python
+from langgraph_node_deadline import cooperative_poll, aclosing
+
+async with aclosing(cooperative_poll(agent.astream(state))) as stream:
+    async for chunk in stream:
+        sections.append(chunk)
+        if have_enough(sections):
+            break                       # upstream closed here, deterministically
+```
+
 See it run — a greedy phase eats the budget but the memo still ships:
 
 ```bash
@@ -172,6 +211,37 @@ python examples/hourglass_demo.py
 > `Hourglass` lives on the `v0.2` branch, tracked in
 > [issue #1](https://github.com/youknowfred/langgraph-node-deadline/issues/1).
 > The kernel above is stable and shipped in `0.1.0`.
+
+## When NOT to use this
+
+This is a small, sharp tool for one failure mode. Reach for something else when:
+
+- **You don't have an outer watchdog at all.** If nothing is hard-killing your
+  node, you don't need to clamp to it — a plain `asyncio.wait_for` or
+  `asyncio.timeout` is simpler.
+- **Your work isn't cooperative.** The salvage trick needs your inner calls to
+  `await` (so a clamped timeout can fire) and a `try/except` that returns partial
+  state. A single blocking C call or a tight CPU loop with no `await` can't be
+  interrupted cooperatively — clamp won't help.
+- **You want retries, not salvage.** If the right answer to a timeout is "try
+  again with backoff," use [tenacity](https://github.com/jd/tenacity) or
+  LangGraph's `RetryPolicy`. This package is about *keeping partial work*, not
+  re-running.
+- **You need cost/token budgets.** For per-node *spend* enforcement,
+  [Cycles](https://runcycles.io/how-to/integrating-cycles-with-langgraph) does
+  that. `Hourglass` is wall-clock time only (token/$ axes are deferred to v0.3).
+
+### Honest comparison
+
+| | What it gives you | What it doesn't |
+| --- | --- | --- |
+| `asyncio.timeout` / `wait_for` | One timeout around one call | No *shared* deadline across nested layers; each call re-derives its own clock — the exact trap this package closes |
+| tenacity / `RetryPolicy` | Retry with backoff | Re-runs from scratch; doesn't salvage the partial work a timeout discards |
+| Cycles | Per-node **cost/token** budget | Not a wall-clock deadline; no partial-output salvage |
+| **`langgraph-node-deadline`** | One binding deadline every inner timeout clamps to, so work **salvages** before the watchdog kills it | Not a retrier, not a cost meter — wall-clock salvage only |
+
+The kernel is stdlib-only and `asyncio.wait_for`-based under the hood; the value
+isn't new machinery, it's the *discipline* of one deadline instead of four.
 
 ## Why a package for something so small
 

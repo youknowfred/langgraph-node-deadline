@@ -155,6 +155,21 @@ async def _quick():
     return "done"
 
 
+async def test_cooperative_wait_for_returns_already_done_result_at_blown_deadline():
+    # T2.4: a finished result is salvage, not waste — an already-complete awaitable
+    # returns its value even though the deadline has passed; a bare coroutine times out.
+    async def instant():
+        return "RESULT"
+
+    done = asyncio.ensure_future(instant())
+    await asyncio.sleep(0)  # let it complete
+    with node_deadline_scope(time.monotonic() - 1.0):  # deadline already blown
+        assert await cooperative_wait_for(done, budget_secs=5.0) == "RESULT"
+    with node_deadline_scope(time.monotonic() - 1.0):
+        with pytest.raises(asyncio.TimeoutError):
+            await cooperative_wait_for(asyncio.sleep(5.0), budget_secs=5.0)
+
+
 # --------------------------------------------------------------------------- #
 # cooperative_poll (streaming salvage)                                         #
 # --------------------------------------------------------------------------- #

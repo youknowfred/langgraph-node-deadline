@@ -3,7 +3,7 @@
 The problem this solves
 -----------------------
 A LangGraph node that does real work usually has *several* layers each
-re-deriving their own clock: an outer ``TimeoutPolicy`` watchdog, an inner
+re-deriving their own clock: an outer ``step_timeout`` watchdog, an inner
 agent/tool budget, a retry loop, a sub-planner that "wants" 60 seconds. When
 those clocks disagree, the inner layers dispatch work the outer watchdog is
 guaranteed to kill — and the kill is uncooperative: it cancels the node and
@@ -198,6 +198,11 @@ async def cooperative_wait_for(
 
     With no active deadline scope this is a plain ``wait_for(awaitable,
     budget_secs)`` — fail-open, no behavior change.
+
+    If the awaitable is *already complete* when the clamped budget is ``<= 0``
+    (the deadline has passed), its result is returned rather than raising — a
+    finished value is salvage, not waste. This matches ``asyncio.wait_for`` and is
+    stable across CPython 3.9–3.13.
 
     Raises:
         asyncio.TimeoutError: if the clamped budget elapses first.
