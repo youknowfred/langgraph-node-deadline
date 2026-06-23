@@ -273,6 +273,31 @@ def test_mode_comparison_with_bogus_string_raises():
         _ = Mode.NORMAL >= "not_a_mode"
 
 
+def test_mode_ordering_against_uncoercible_object_raises():
+    # Every ordering operator coerces the other operand; an object that is neither
+    # a Mode, a name, nor an int rank makes coerce() raise, the operator returns
+    # NotImplemented, and Python falls back to TypeError instead of mis-ordering.
+    sentinel = object()
+    for op in (
+        lambda: Mode.NORMAL > sentinel,
+        lambda: Mode.NORMAL < sentinel,
+        lambda: Mode.NORMAL <= sentinel,
+        lambda: Mode.NORMAL >= sentinel,
+    ):
+        with pytest.raises(TypeError):
+            op()
+
+
+def test_mode_ordering_accepts_le_and_int_rank():
+    # `<=` participates in the ordering idiom (its happy path), and coerce() also
+    # accepts a bare int rank, so a Mode compares against its integer position.
+    assert Mode.NORMAL <= Mode.CONSERVE
+    assert Mode.FINISH_ONLY <= "finish_only"
+    assert Mode.CONSERVE < 2          # coerce(2) -> Mode.FINISH_ONLY
+    assert Mode.HALT > 2
+    assert Mode.NORMAL <= 3
+
+
 # --------------------------------------------------------------------------- #
 # async integration (real monotonic clock — these feed the kernel contextvar)  #
 # --------------------------------------------------------------------------- #

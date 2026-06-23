@@ -41,7 +41,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # Test-only; never installed at runtime (the core stays zero-dependency).
-dev = ["pytest>=7", "pytest-asyncio>=0.23", "hypothesis>=6"]
+dev = ["pytest>=7", "pytest-asyncio>=0.23", "hypothesis>=6", "pytest-cov>=4"]
 # Static-analysis gate run in CI. Optional; not needed to use the package.
 lint = ["mypy>=1.10", "ruff>=0.5", "vermin>=1.6", "pyright>=1.1.350"]
 # Real-LangGraph integration test only. Optional; NEVER a runtime dependency —
@@ -59,3 +59,12 @@ packages = ["src/langgraph_node_deadline"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+# The langgraph integration submodule is lazily imported and exercised only by the
+# separate `integration` CI job (it needs the optional [langgraph] extra). The gated
+# `test` matrix installs [dev] only, so this module is never imported there — counting
+# it would report 0% and sink the branch gate. Its real coverage is the integration
+# job's concern; the core kernel + hourglass are what the gate measures.
+omit = ["*/langgraph_node_deadline/langgraph.py"]

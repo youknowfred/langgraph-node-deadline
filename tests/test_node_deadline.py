@@ -405,6 +405,68 @@ async def test_aclosing_yields_all_then_closes_when_consumed_fully():
 
 
 # --------------------------------------------------------------------------- #
+# aclose-edge branches: an iterator without aclose(), and one whose aclose()   #
+# raises (cooperative_poll swallows it; aclosing propagates it).               #
+# --------------------------------------------------------------------------- #
+
+
+class _AsyncRange:
+    """A hand-rolled async iterator with NO aclose() method (unlike a generator)."""
+
+    def __init__(self, n: int):
+        self._it = iter(range(n))
+
+    def __aiter__(self) -> "_AsyncRange":
+        return self
+
+    async def __anext__(self) -> int:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+class _AsyncRangeRaisingAclose(_AsyncRange):
+    """Same, but aclose() raises — cooperative_poll must swallow it best-effort."""
+
+    async def aclose(self) -> None:
+        raise RuntimeError("aclose boom")
+
+
+async def test_cooperative_poll_handles_iterator_without_aclose():
+    # No aclose attribute -> the best-effort teardown branch is a no-op, and the
+    # stream still drains fully.
+    out = [c async for c in cooperative_poll(_AsyncRange(3))]
+    assert out == [0, 1, 2]
+
+
+async def test_cooperative_poll_swallows_aclose_errors():
+    # The upstream's aclose() raises, but cooperative_poll's teardown is best-effort
+    # (per its docstring) — the error is swallowed and the chunks still come through.
+    out = [c async for c in cooperative_poll(_AsyncRangeRaisingAclose(3))]
+    assert out == [0, 1, 2]
+
+
+async def test_aclosing_is_a_noop_without_aclose():
+    # aclosing over a plain object (no aclose) just yields it and exits cleanly.
+    sentinel = object()
+    async with aclosing(sentinel) as thing:
+        assert thing is sentinel
+
+
+async def test_aclosing_propagates_aclose_errors():
+    # Unlike cooperative_poll, aclosing does NOT swallow aclose() errors (it mirrors
+    # contextlib.aclosing) — the error surfaces to the caller.
+    class _RaisingClose:
+        async def aclose(self) -> None:
+            raise RuntimeError("aclose boom")
+
+    with pytest.raises(RuntimeError, match="aclose boom"):
+        async with aclosing(_RaisingClose()):
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # T1.2 / T1.4 — clamp robustness: negative reserve, NaN/inf inputs             #
 # --------------------------------------------------------------------------- #
 
